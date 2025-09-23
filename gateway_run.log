@@ -1,0 +1,6 @@
+[gateway] listening on http://localhost:3099/st
+POST /api/backends/chat-completions/generate 200 270 - 5441.995 ms id=- uid=- tenant=-
+GET /api/extensions/discover 200 92 - 8.087 ms id=- uid=- tenant=-
+GET /api/extensions/discover 200 92 - 2.312 ms id=- uid=- tenant=-
+GET /api/extensions/discover 200 92 - 0.406 ms id=- uid=- tenant=-
+GET /api/extensions/discover 200 92 - 1.315 ms id=- uid=- tenant=-

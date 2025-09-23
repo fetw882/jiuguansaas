@@ -1,0 +1,44 @@
+name: E2E
+
+on:
+  push:
+    branches: [ main, master, release ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install deps (gateway)
+        run: |
+          cd gateway
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          npx playwright install --with-deps
+      - name: Start server
+        run: |
+          nohup node gateway/server.js > gw.log 2>&1 & echo $! > gw.pid
+          for i in {1..30}; do curl -sf http://127.0.0.1:3080/api/ping && break || sleep 1; done
+      - name: Run E2E tests
+        run: |
+          cd gateway
+          npm run test:e2e
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p artifacts
+          curl -s http://127.0.0.1:3080/api/_diagnostics/state > artifacts/diagnostics-state.json || true
+          curl -s http://127.0.0.1:3080/api/_diagnostics/radar > artifacts/radar.json || true
+          cp -r gateway/playwright-report artifacts/playwright-report || true
+          cp gw.log artifacts/gateway.log || true
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: artifacts
+
