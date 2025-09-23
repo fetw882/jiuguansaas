@@ -1936,8 +1936,7 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
             if (anchor2.trim()) { sysList.push(anchor2); res.setHeader('x-st-intent-anchored', 'on'); }
           }
         } catch {}
-        const sysCombined = sysList.filter(Boolean).join('
-');
+        const sysCombined = sysList.filter(Boolean).join('\n');
         mathIntent2 = oc_isMathIntent(lastUserText2) || oc_isMathIntent(anchorBase2);
         outMessages = sysCombined ? [{ role: 'system', content: sysCombined }, ...nonSystem] : nonSystem;
         if (strictLatest2) {
