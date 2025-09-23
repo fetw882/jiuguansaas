@@ -1289,18 +1289,31 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
         const retries = Math.max(0, Number(config.geminiRetryCount||0));
         const delay = Math.max(0, Number(config.geminiRetryDelayMs||0));
         let lastTxt = '';
+        let lastStatus = 0;
+        let lastErrTxt = '';
         for (let i=0;i<=retries;i++) {
-          const r = await fetch(url, options);
-          lastTxt = await r.text();
-          if (r.ok) return { ok:true, status:r.status, text:lastTxt };
-          // Retry on 429/5xx/UNAVAILABLE
-          if (i < retries && (r.status===429 || (r.status>=500 && r.status<=599))) {
-            await new Promise(res=>setTimeout(res, delay * Math.pow(2,i)));
-            continue;
+          try {
+            const r = await fetch(url, options);
+            lastStatus = r.status;
+            lastTxt = await r.text();
+            if (r.ok) return { ok:true, status:r.status, text:lastTxt };
+            // Retry on 429/5xx/UNAVAILABLE
+            if (i < retries && (r.status===429 || (r.status>=500 && r.status<=599))) {
+              await new Promise(res=>setTimeout(res, delay * Math.pow(2,i)));
+              continue;
+            }
+            return { ok:false, status:r.status, text:lastTxt };
+          } catch (err) {
+            lastErrTxt = err && typeof err.message === 'string' ? err.message : '';
+            if (i < retries) {
+              await new Promise(res=>setTimeout(res, delay * Math.pow(2,i)));
+              continue;
+            }
+            break;
           }
-          return { ok:false, status:r.status, text:lastTxt };
         }
-        return { ok:false, status:0, text:lastTxt };
+        const fallbackText = lastTxt || lastErrTxt || 'request failed';
+        return { ok:false, status:lastStatus, text:fallbackText };
       }
       // Math/Story intent detectors used for anchoring/short-circuit and guidance
       function isMathIntentText(s) {
