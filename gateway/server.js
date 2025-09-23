@@ -1805,111 +1805,129 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
       const nonSystem = nonSystemClipped
         .map(m => ({ role: m.role, content: oc_scrubMeta(oc_toText(m)) }))
         .filter(x => String(x.content||'').trim().length>0);
-      const sysList = [];
-      if (sysText && !config.strictLatestDropPersona) sysList.push(sysText);
-      if (config.injectChineseOnZhUI && /^zh/.test(acceptLang)) {
-        sysList.push(config.chineseInstructionText || '请用中文回复');
-        res.setHeader('x-st-lang-injected', 'zh');
-      }
-      try {
-        if (!config.strictLatestDropPersona && config.roleplayUseCharacterCard && charName) {
-          const auth = requireAuth(req, res);
-          const uid = auth?.uid || '';
-          if (uid) {
-            const chars = await listCharacters(uid);
-            const foundChar = chars.find(c => String(c.name||'').toLowerCase() === String(charName).toLowerCase());
-            if (foundChar) {
-              const t = /^zh/.test(acceptLang) ? (config.roleplayCardTemplateZH||'') : (config.roleplayCardTemplateEN||'');
-              const persona = t
-                .replace('{name}', String(foundChar.name||''))
-                .replace('{description}', String(foundChar.description||''))
-                .replace('{personality}', String(foundChar.personality||''))
-                .replace('{scenario}', String(foundChar.scenario||''))
-                .replace('{first_mes}', String(foundChar.first_mes||''));
-              if (persona.trim()) {
-                sysList.push(persona);
-                res.setHeader('x-st-card-injected', 'on');
+      let outMessages = [];
+      let lastUserText2 = '';
+      let anchorBase2 = '';
+      let strictLatest2 = !!config.strictLatestOnly;
+      let mathIntent2 = false;
+
+      if (config.preserveMessageStructure) {
+        outMessages = messages
+          .filter(m => m && typeof m === 'object' && typeof m.role === 'string')
+          .map(m => ({ ...m }));
+        const lastUserMsg2 = messages.slice().reverse().find(m => String(m.role||'').toLowerCase()==='user');
+        lastUserText2 = lastUserMsg2 ? toText(lastUserMsg2) : '';
+        const lastAnyText2 = (function(){ for (let i=messages.length-1;i>=0;i--){ const t=String(toText(messages[i])||'').trim();if(t) return t;} return '';})();
+        anchorBase2 = lastUserText2 || lastAnyText2;
+        mathIntent2 = oc_isMathIntent(lastUserText2) || oc_isMathIntent(anchorBase2);
+      } else {
+        const sysList = [];
+        if (sysText && !config.strictLatestDropPersona) sysList.push(sysText);
+        if (config.injectChineseOnZhUI && /^zh/.test(acceptLang)) {
+          sysList.push(config.chineseInstructionText || '请用中文回复');
+          res.setHeader('x-st-lang-injected', 'zh');
+        }
+        try {
+          if (!config.strictLatestDropPersona && config.roleplayUseCharacterCard && charName) {
+            const auth = requireAuth(req, res);
+            const uid = auth?.uid || '';
+            if (uid) {
+              const chars = await listCharacters(uid);
+              const foundChar = chars.find(c => String(c.name||'').toLowerCase() === String(charName).toLowerCase());
+              if (foundChar) {
+                const t = /^zh/.test(acceptLang) ? (config.roleplayCardTemplateZH||'') : (config.roleplayCardTemplateEN||'');
+                const persona = t
+                  .replace('{name}', String(foundChar.name||''))
+                  .replace('{description}', String(foundChar.description||''))
+                  .replace('{personality}', String(foundChar.personality||''))
+                  .replace('{scenario}', String(foundChar.scenario||''))
+                  .replace('{first_mes}', String(foundChar.first_mes||''));
+                if (persona.trim()) {
+                  sysList.push(persona);
+                  res.setHeader('x-st-card-injected', 'on');
+                }
               }
             }
           }
+        } catch {}
+        if (!config.strictLatestDropPersona && config.roleplayEnforcer && (charName || userName)) {
+          const tmpl = /^zh/.test(acceptLang) ? (config.roleplayInstructionZH || '') : (config.roleplayInstructionEN || '');
+          const text = tmpl.replace('{char}', charName || '角色').replace('{user}', userName || '用户');
+          if (text) sysList.push(text);
+          res.setHeader('x-st-roleplay-enforcer', 'on');
         }
-      } catch {}
-      if (!config.strictLatestDropPersona && config.roleplayEnforcer && (charName || userName)) {
-        const tmpl = /^zh/.test(acceptLang) ? (config.roleplayInstructionZH || '') : (config.roleplayInstructionEN || '');
-        const text = tmpl.replace('{char}', charName || '角色').replace('{user}', userName || '用户');
-        if (text) sysList.push(text);
-        res.setHeader('x-st-roleplay-enforcer', 'on');
-      }
-      if (config.forceUserPriority) {
-        sysList.push(/^zh/.test(acceptLang) ? (config.userPriorityTextZH || '') : (config.userPriorityTextEN || ''));
-        res.setHeader('x-st-user-priority', 'on');
-      }
-      // Ensure latest user input present in OpenAI-compatible payload
-      const lastUserMsg2 = messages.slice().reverse().find(m => String(m.role||'').toLowerCase()==='user');
-      let lastUserText2 = lastUserMsg2 ? toText(lastUserMsg2) : '';
-      if (!lastUserText2) {
-        const hdr2 = String(req.headers['x-st-last-input']||'');
-        if (hdr2) {
-          try { lastUserText2 = decodeURIComponent(hdr2); } catch { lastUserText2 = hdr2; }
-          res.setHeader('x-st-last-input-used', 'header');
+        if (config.forceUserPriority) {
+          sysList.push(/^zh/.test(acceptLang) ? (config.userPriorityTextZH || '') : (config.userPriorityTextEN || ''));
+          res.setHeader('x-st-user-priority', 'on');
         }
-      }
-      const lastAnyText2 = (function(){ for (let i=messages.length-1;i>=0;i--){ const t=String(toText(messages[i])||'').trim(); if(t) return t;} return '';})();
-      const anchorBase2 = lastUserText2 || lastAnyText2;
-      const strictLatest2 = !!config.strictLatestOnly;
-      // Intent rules for OpenAI-compatible branch (before sysCombined)
-      try {
-        if (!strictLatest2 && lastUserText2) {
-          const isMath2 = oc_isMathIntent(lastUserText2);
-          const isStory2 = oc_isStoryIntent(lastUserText2);
-          if (config.intentRuleMath && isMath2) {
-            const rule = /^zh/.test(acceptLang) ? (config.intentRuleMathTextZH||'') : (config.intentRuleMathTextEN||'');
-            if (rule) { sysList.push(rule); res.setHeader('x-st-intent-rule', 'math'); }
-          }
-          if (config.intentRuleStory && isStory2) {
-            const rule2 = /^zh/.test(acceptLang) ? (config.intentRuleStoryTextZH||'') : (config.intentRuleStoryTextEN||'');
-            if (rule2) { sysList.push(rule2); res.setHeader('x-st-intent-rule', 'story'); }
+        const lastUserMsg2 = messages.slice().reverse().find(m => String(m.role||'').toLowerCase()==='user');
+        lastUserText2 = lastUserMsg2 ? toText(lastUserMsg2) : '';
+        if (!lastUserText2) {
+          const hdr2 = String(req.headers['x-st-last-input']||'');
+          if (hdr2) {
+            try { lastUserText2 = decodeURIComponent(hdr2); } catch { lastUserText2 = hdr2; }
+            res.setHeader('x-st-last-input-used', 'header');
           }
         }
-        if (!strictLatest2 && anchorBase2) {
-          const isMathA = oc_isMathIntent(anchorBase2);
-          const isStoryA = oc_isStoryIntent(anchorBase2);
-          if (config.intentRuleMath && isMathA) {
-            const ruleA = /^zh/.test(acceptLang) ? (config.intentRuleMathTextZH||'') : (config.intentRuleMathTextEN||'');
-            if (ruleA) { sysList.push(ruleA); res.setHeader('x-st-intent-rule', 'math'); }
+        const lastAnyText2 = (function(){ for (let i=messages.length-1;i>=0;i--){ const t=String(toText(messages[i])||'').trim();if(t) return t;} return '';})();
+        anchorBase2 = lastUserText2 || lastAnyText2;
+        try {
+          if (!strictLatest2 && lastUserText2) {
+            const isMath2 = oc_isMathIntent(lastUserText2);
+            const isStory2 = oc_isStoryIntent(lastUserText2);
+            if (config.intentRuleMath && isMath2) {
+              const rule = /^zh/.test(acceptLang) ? (config.intentRuleMathTextZH||'') : (config.intentRuleMathTextEN||'');
+              if (rule) { sysList.push(rule); res.setHeader('x-st-intent-rule', 'math'); }
+            }
+            if (config.intentRuleStory && isStory2) {
+              const rule2 = /^zh/.test(acceptLang) ? (config.intentRuleStoryTextZH||'') : (config.intentRuleStoryTextEN||'');
+              if (rule2) { sysList.push(rule2); res.setHeader('x-st-intent-rule', 'story'); }
+            }
           }
-          if (config.intentRuleStory && isStoryA) {
-            const ruleA2 = /^zh/.test(acceptLang) ? (config.intentRuleStoryTextZH||'') : (config.intentRuleStoryTextEN||'');
-            if (ruleA2) { sysList.push(ruleA2); res.setHeader('x-st-intent-rule', 'story'); }
+          if (!strictLatest2 && anchorBase2) {
+            const isMathA = oc_isMathIntent(anchorBase2);
+            const isStoryA = oc_isStoryIntent(anchorBase2);
+            if (config.intentRuleMath && isMathA) {
+              const ruleA = /^zh/.test(acceptLang) ? (config.intentRuleMathTextZH||'') : (config.intentRuleMathTextEN||'');
+              if (ruleA) { sysList.push(ruleA); res.setHeader('x-st-intent-rule', 'math'); }
+            }
+            if (config.intentRuleStory && isStoryA) {
+              const ruleA2 = /^zh/.test(acceptLang) ? (config.intentRuleStoryTextZH||'') : (config.intentRuleStoryTextEN||'');
+              if (ruleA2) { sysList.push(ruleA2); res.setHeader('x-st-intent-rule', 'story'); }
+            }
+          }
+          if (!strictLatest2 && config.intentAnchor && lastUserText2) {
+            const max2 = Math.max(40, Number(config.intentAnchorClamp||400));
+            const brief2 = String(lastUserText2).slice(0, max2);
+            const t2 = /^zh/.test(acceptLang) ? (config.intentAnchorTextZH||'') : (config.intentAnchorTextEN||'');
+            const anchor2 = t2.replace('{lastUser}', brief2);
+            if (anchor2.trim()) { sysList.push(anchor2); res.setHeader('x-st-intent-anchored', 'on'); }
+          }
+        } catch {}
+        const sysCombined = sysList.filter(Boolean).join('
+');
+        mathIntent2 = oc_isMathIntent(lastUserText2) || oc_isMathIntent(anchorBase2);
+        outMessages = sysCombined ? [{ role: 'system', content: sysCombined }, ...nonSystem] : nonSystem;
+        if (strictLatest2) {
+          const collapsed2 = String(lastUserText2 || anchorBase2 || '').trim();
+          outMessages = sysCombined ? [{ role: 'system', content: sysCombined }, { role: 'user', content: collapsed2 }] : [{ role: 'user', content: collapsed2 }];
+        }
+      }
+
+      if (!config.preserveMessageStructure) {
+        if (lastUserText2) {
+          const lastUserInPayload = [...outMessages].reverse().find(m => m.role==='user')?.content || '';
+          if (!lastUserInPayload || String(lastUserInPayload).trim() !== String(lastUserText2).trim()) {
+            outMessages = [...outMessages, { role: 'user', content: String(lastUserText2) }];
+            res.setHeader('x-st-user-injected', 'true');
           }
         }
-        if (!strictLatest2 && config.intentAnchor && lastUserText2) {
-          const max2 = Math.max(40, Number(config.intentAnchorClamp||400));
-          const brief2 = String(lastUserText2).slice(0, max2);
-          const t2 = /^zh/.test(acceptLang) ? (config.intentAnchorTextZH||'') : (config.intentAnchorTextEN||'');
-          const anchor2 = t2.replace('{lastUser}', brief2);
-          if (anchor2.trim()) { sysList.push(anchor2); res.setHeader('x-st-intent-anchored', 'on'); }
+        if (!strictLatest2 && config.hardIntentAppend && anchorBase2 && !mathIntent2) {
+          const suffix2 = /^zh/.test(acceptLang) ? (config.hardIntentSuffixZH||'') : (config.hardIntentSuffixEN||'');
+          const brief4 = String(anchorBase2).slice(0, Math.max(40, Number(config.intentAnchorClamp||400)));
+          outMessages = [...outMessages, { role: 'user', content: `${brief4}${suffix2}` }];
+          res.setHeader('x-st-hard-append', 'on');
         }
-      } catch {}
-      const sysCombined = sysList.filter(Boolean).join('\n');
-      const mathIntent2 = oc_isMathIntent(lastUserText2) || oc_isMathIntent(anchorBase2);
-      let outMessages = sysCombined ? [{ role: 'system', content: sysCombined }, ...nonSystem] : nonSystem;
-      if (strictLatest2) {
-        const collapsed2 = String(lastUserText2 || anchorBase2 || '').trim();
-        outMessages = sysCombined ? [{ role: 'system', content: sysCombined }, { role: 'user', content: collapsed2 }] : [{ role: 'user', content: collapsed2 }];
-      }
-      if (lastUserText2) {
-        const lastUserInPayload = [...outMessages].reverse().find(m => m.role==='user')?.content || '';
-        if (!lastUserInPayload || String(lastUserInPayload).trim() !== String(lastUserText2).trim()) {
-          outMessages = [...outMessages, { role: 'user', content: String(lastUserText2) }];
-          res.setHeader('x-st-user-injected', 'true');
-        }
-      }
-      if (!strictLatest2 && config.hardIntentAppend && anchorBase2 && !mathIntent2) {
-        const suffix2 = /^zh/.test(acceptLang) ? (config.hardIntentSuffixZH||'') : (config.hardIntentSuffixEN||'');
-        const brief4 = String(anchorBase2).slice(0, Math.max(40, Number(config.intentAnchorClamp||400)));
-        outMessages = [...outMessages, { role: 'user', content: `${brief4}${suffix2}` }];
-        res.setHeader('x-st-hard-append', 'on');
       }
       const reqMax = Number(body.max_tokens);
       const capMax = Number(config.openaiCompatMaxTokens || 1024);
