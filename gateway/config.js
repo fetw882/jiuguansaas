@@ -57,6 +57,8 @@ export const config = {
   intentRuleStory: process.env.INTENT_RULE_STORY !== 'false',
   intentRuleStoryTextZH: process.env.INTENT_RULE_STORY_TEXT_ZH || '如果最新意图包含“剧情推进/继续剧情/采取行动”，请立刻在既有世界观内执行下一步具体行动，避免寒暄与重启。',
   intentRuleStoryTextEN: process.env.INTENT_RULE_STORY_TEXT_EN || 'If the latest intent says to advance/continue/act, immediately take the next concrete action within the existing world without small talk or restarts.',
+  // Keep SillyTavern message payload structure unchanged when proxying requests
+  preserveMessageStructure: process.env.PRESERVE_MESSAGE_STRUCTURE !== 'false',
   // Scrub SillyTavern meta prompts like [Start a new Chat] from payload text
   scrubStMetaPrompts: process.env.SCRUB_ST_META_PROMPTS !== 'false',
   // Output token caps (to avoid upstream 400/413 on large max_tokens)
