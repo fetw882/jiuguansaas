@@ -135,6 +135,7 @@ const oai_max_temp = 2.0;
 const claude_max_temp = 1.0;
 const openrouter_website_model = 'OR_Website';
 const openai_max_stop_strings = 4;
+const MIN_PROMPT_RESERVE_TOKENS = 256;
 
 const textCompletionModels = [
     'gpt-3.5-turbo-instruct',
@@ -528,6 +529,43 @@ const oai_settings = {
     bind_preset_to_connection: true,
     extensions: {},
 };
+
+function getOpenAIReservedTokens(contextTokens) {
+    const context = Math.max(Number(contextTokens) || 0, 0);
+    if (context <= 1) {
+        return 0;
+    }
+
+    const ratioReserve = Math.max(Math.floor(context * 0.1), 1);
+    const maxReserve = Math.max(1, context - 1);
+    let desiredReserve = ratioReserve;
+
+    if (context > MIN_PROMPT_RESERVE_TOKENS) {
+        desiredReserve = Math.max(desiredReserve, MIN_PROMPT_RESERVE_TOKENS);
+    }
+
+    return Math.min(desiredReserve, maxReserve);
+}
+
+function clampOpenAIMaxTokens({ silent = false } = {}) {
+    const reserve = getOpenAIReservedTokens(oai_settings.openai_max_context);
+    const maxAllowed = oai_settings.openai_max_context > 0
+        ? Math.max(1, oai_settings.openai_max_context - reserve)
+        : Math.max(1, oai_settings.openai_max_tokens);
+
+    $('#openai_max_tokens').attr('max', maxAllowed);
+
+    if (oai_settings.openai_max_tokens > maxAllowed) {
+        oai_settings.openai_max_tokens = maxAllowed;
+        $('#openai_max_tokens').val(String(maxAllowed));
+        if (promptManager?.serviceSettings) {
+            promptManager.serviceSettings.openai_max_tokens = maxAllowed;
+        }
+        if (!silent) {
+            toastr.info(t`Adjusted the maximum response tokens to preserve conversation context.`);
+        }
+    }
+}
 
 export let proxies = [
     {
@@ -3502,6 +3540,7 @@ function loadOpenAISettings(data, settings) {
     oai_settings.stream_openai = settings.stream_openai ?? default_settings.stream_openai;
     oai_settings.openai_max_context = settings.openai_max_context ?? default_settings.openai_max_context;
     oai_settings.openai_max_tokens = settings.openai_max_tokens ?? default_settings.openai_max_tokens;
+    clampOpenAIMaxTokens({ silent: true });
     oai_settings.bias_preset_selected = settings.bias_preset_selected ?? default_settings.bias_preset_selected;
     oai_settings.bias_presets = settings.bias_presets ?? default_settings.bias_presets;
     oai_settings.max_context_unlocked = settings.max_context_unlocked ?? default_settings.max_context_unlocked;
@@ -6116,12 +6155,14 @@ export function initOpenAI() {
     $('#openai_max_context').on('input', function () {
         oai_settings.openai_max_context = Number($(this).val());
         $('#openai_max_context_counter').val(`${$(this).val()}`);
+        clampOpenAIMaxTokens();
         calculateOpenRouterCost();
         saveSettingsDebounced();
     });
 
     $('#openai_max_tokens').on('input', function () {
         oai_settings.openai_max_tokens = Number($(this).val());
+        clampOpenAIMaxTokens();
         calculateOpenRouterCost();
         saveSettingsDebounced();
     });
