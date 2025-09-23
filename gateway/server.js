@@ -1817,9 +1817,28 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
           .map(m => ({ ...m }));
         const lastUserMsg2 = messages.slice().reverse().find(m => String(m.role||'').toLowerCase()==='user');
         lastUserText2 = lastUserMsg2 ? toText(lastUserMsg2) : '';
+        if (!lastUserText2) {
+          const hdr2 = String(req.headers['x-st-last-input']||'');
+          if (hdr2) {
+            try { lastUserText2 = decodeURIComponent(hdr2); } catch { lastUserText2 = hdr2; }
+            res.setHeader('x-st-last-input-used', 'header');
+          }
+        }
         const lastAnyText2 = (function(){ for (let i=messages.length-1;i>=0;i--){ const t=String(toText(messages[i])||'').trim();if(t) return t;} return '';})();
         anchorBase2 = lastUserText2 || lastAnyText2;
         mathIntent2 = oc_isMathIntent(lastUserText2) || oc_isMathIntent(anchorBase2);
+        const trimmedLastUserText2 = String(lastUserText2 || '').trim();
+        if (trimmedLastUserText2) {
+          const hasMatchingUser = outMessages.some(m => {
+            if (!m || typeof m !== 'object') return false;
+            if (String(m.role || '').toLowerCase() !== 'user') return false;
+            return String(toText(m) || '').trim() === trimmedLastUserText2;
+          });
+          if (!hasMatchingUser) {
+            outMessages = [...outMessages, { role: 'user', content: lastUserText2 }];
+            res.setHeader('x-st-user-injected', 'true');
+          }
+        }
       } else {
         const sysList = [];
         if (sysText && !config.strictLatestDropPersona) sysList.push(sysText);
