@@ -1,5 +1,4 @@
 import fs from 'fs';
-import path from 'path';
 import extract from 'png-chunks-extract';
 import encode from 'png-chunks-encode';
 import text from 'png-chunk-text';

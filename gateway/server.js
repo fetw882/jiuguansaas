@@ -2,7 +2,6 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import fsp from 'fs/promises';
 import cookieParser from 'cookie-parser';
 import morgan from 'morgan';
 import { fileURLToPath } from 'url';
@@ -12,9 +11,21 @@ import { config } from './config.js';
 import { isOwned, isKilled, ownedEndpoints, killList as killListArray } from './mapping.js';
 import crypto from 'crypto';
 import { signToken, verifyToken } from './auth.js';
-import { upsertUser, getUserByEmail, getUserSettings, saveUserSettings, listCharacters, addCharacter, getCharacterByAvatar, listCharacterChats, saveCharacterChat, getCharacterChat, deleteCharacterChat, getEntitlements, setEntitlements, saveCharacters, listPresets, savePreset, getPreset, deletePreset, getWorldInfo, saveWorldInfo, listGroups, addGroup, saveGroups, getGroupById, deleteGroup, getSecretState, writeSecretValue, findSecretValue, deleteSecretValue, rotateSecretValue, renameSecretValue } from './db/index.js';
+import { upsertUser, getUserByEmail, getUserSettings, saveUserSettings, listCharacters, addCharacter, getCharacterByAvatar, listCharacterChats, saveCharacterChat, getCharacterChat, deleteCharacterChat, getEntitlements, setEntitlements, saveCharacters, listPresets, savePreset, getPreset, deletePreset, getWorldInfo, saveWorldInfo, listGroups, addGroup, saveGroups, deleteGroup, getSecretState, writeSecretValue, findSecretValue, deleteSecretValue, rotateSecretValue, renameSecretValue } from './db/index.js';
 import multer from 'multer';
 import { makeCardPngFromFile, readCardFromPng } from './utils/pngCard.js';
+import {
+  ADVANCED_PRESET_CATEGORIES,
+  COMPLETION_PRESET_CATEGORIES,
+  mergeDefaultAndUserPresets,
+  mergeDefaultAndUserCompletionPresets,
+  getDefaultPreset,
+  getDefaultCompletionPreset,
+  mergeDefaultAndUserNamedCollection,
+  getDefaultNamedEntry,
+  getDefaultWorldNames,
+  mergeSettingsWithDefaults,
+} from './utils/defaultPresets.js';
 import * as esbuild from 'esbuild';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -26,6 +37,20 @@ const BASE_PATH = config.basePath;
 const INJECT_BASE = config.injectBase;
 const ROOT_DIR = path.resolve(__dirname, '..');
 const ST_PUBLIC = path.resolve(ROOT_DIR, 'SillyTavern', 'public');
+
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+const OPENROUTER_HEADER_DEFAULTS = Object.freeze({
+  'HTTP-Referer': config.openrouterReferer || 'https://sillytavern.app',
+  'X-Title': config.openrouterTitle || 'SillyTavern',
+});
+
+const GEMINI_SAFETY = [
+  { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'OFF' },
+  { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'OFF' },
+  { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'OFF' },
+  { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'OFF' },
+  { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'OFF' },
+];
 
 // Minimal invariant checks
 if (!fs.existsSync(ST_PUBLIC)) {
@@ -256,30 +281,76 @@ app.get('/st-auth', (req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>body{font-family:sans-serif;max-width:420px;margin:40px auto;padding:0 12px}label{display:block;margin:10px 0 4px}input{width:100%;padding:8px}button{margin-top:12px;padding:10px 16px}</style>
   </head><body>
-  <h2>SillyTavern Login</h2>
-  <label>Email</label><input id="email" type="email" required />
-  <label>Password</label><input id="password" type="password" required />
-  <label>Card Code (required)</label><input id="card" placeholder="AAAA-BBBB" required />
-  <div><button id="btnLogin">Login</button> <button id="btnRegister">Register</button></div>
+  <h2>SillyTavern 登录</h2>
+  <p style="margin-bottom:12px;color:#555">请输入邮箱和密码。若账号不存在将自动注册。卡密可选，支持后续补录。</p>
+  <label>邮箱</label><input id="email" type="email" required />
+  <label>密码</label><input id="password" type="password" required />
+  <label>卡密（可选）</label><input id="card" placeholder="AAAA-BBBB" />
+  <div><button id="btnSubmit">登录 / 注册</button> <button id="btnRedeem" type="button">仅兑换卡密</button></div>
   <p id="msg"></p>
   <script>
-  // Auto-detect already logged-in state and redirect
   (async function(){
     try{
       const r = await fetch('/api/auth/me', { method:'GET', credentials:'include' });
       if (r.ok) {
         const j = await r.json();
         document.getElementById('msg').textContent = '已登录：'+(j.user && j.user.email || '');
-        setTimeout(()=>{ location.href='/st'; }, 500);
+        setTimeout(()=>{ location.href='/st'; }, 800);
       }
     }catch{}
   })();
-  async function call(url,data){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(data)});const t=await r.text();try{return {ok:r.ok,data:JSON.parse(t)}}catch{ return {ok:r.ok,data:t} }}
+  async function call(url,data){
+    const r = await fetch(url,{method:'POST',headers:{'content-type':'application/json'},credentials:'include',body:JSON.stringify(data)});
+    const t = await r.text();
+    let parsed = t;
+    try { parsed = JSON.parse(t); } catch {}
+    return { ok: r.ok, status: r.status, data: parsed };
+  }
   function q(id){return document.getElementById(id)}
-  function setMsg(s){q('msg').textContent=s}
-  async function redeem(){ const code=q('card').value.trim(); if(!code){ throw new Error('Card required'); } await call('/api/cards/redeem',{code}); }
-  q('btnLogin').onclick=async()=>{ setMsg(''); const email=q('email').value, password=q('password').value, card=q('card').value.trim(); if(!card){ setMsg('Card required'); return; } const r=await call('/api/auth/login',{email,password}); if(!r.ok){setMsg('Login failed');return;} const rr=await call('/api/cards/redeem',{code:card}); if(!rr.ok){ setMsg('Redeem failed'); return; } location.href='/st'; };
-  q('btnRegister').onclick=async()=>{ setMsg(''); const email=q('email').value, password=q('password').value, card=q('card').value.trim(); if(!card){ setMsg('Card required'); return; } const r=await call('/api/auth/register',{email,password,card}); if(!r.ok){setMsg('Register failed');return;} location.href='/st'; };
+  function setMsg(text){ q('msg').textContent = text || ''; }
+  function extractError(resp){
+    if (resp?.data && typeof resp.data === 'object' && resp.data.message) return resp.data.message;
+    if (typeof resp?.data === 'string') return resp.data;
+    return '操作失败，请重试。';
+  }
+  async function handleSubmit(){
+    setMsg('');
+    const email = q('email').value.trim();
+    const password = q('password').value;
+    const card = q('card').value.trim();
+    if (!email || !password){ setMsg('请填写邮箱和密码'); return; }
+    setMsg('正在处理...');
+    const login = await call('/api/auth/login',{ email, password, card: card || undefined });
+    if (login.ok){
+      setMsg('登录成功，正在跳转...');
+      setTimeout(()=>{ location.href='/st'; }, 400);
+      return;
+    }
+    if (login.status === 401 || login.status === 404){
+      const reg = await call('/api/auth/register',{ email, password, card: card || undefined });
+      if (reg.ok){
+        setMsg('账号已创建，正在跳转...');
+        setTimeout(()=>{ location.href='/st'; }, 400);
+        return;
+      }
+      setMsg(extractError(reg));
+      return;
+    }
+    setMsg(extractError(login));
+  }
+  async function handleRedeem(){
+    setMsg('');
+    const card = q('card').value.trim();
+    if (!card){ setMsg('请输入卡密'); return; }
+    const resp = await call('/api/cards/redeem',{ code: card });
+    if (resp.ok){
+      setMsg('兑换成功，权益已更新。');
+    } else {
+      setMsg(extractError(resp));
+    }
+  }
+  q('btnSubmit').onclick = handleSubmit;
+  q('btnRedeem').onclick = handleRedeem;
   </script>
   </body></html>`);
 });
@@ -320,8 +391,8 @@ app.get('/thumbnail', (req, res, next) => {
     if (!fsPath || !fs.existsSync(fsPath)) return res.status(404).send('Not Found');
     setDiagnostics(res, { target: 'compat', authSource: 'none' });
     return res.sendFile(fsPath);
-  } catch (e) {
-    return next(e);
+  } catch (err) {
+    return next(err);
   }
 });
 
@@ -335,6 +406,86 @@ app.use(`${BASE_PATH}/default`, express.static(path.join(ROOT_DIR, 'SillyTavern'
 // Managed backgrounds directory (user-managed, overrides built-ins)
 const MANAGED_BACKGROUNDS_DIR = path.join(__dirname, 'data', 'backgrounds');
 fs.mkdirSync(MANAGED_BACKGROUNDS_DIR, { recursive: true });
+
+const COMPLETION_PRESET_RESPONSE_KEYS = {
+  openai: { names: 'openai_setting_names', values: 'openai_settings' },
+  kobold: { names: 'koboldai_setting_names', values: 'koboldai_settings' },
+  novel: { names: 'novelai_setting_names', values: 'novelai_settings' },
+  textgenerationwebui: { names: 'textgenerationwebui_preset_names', values: 'textgenerationwebui_presets' },
+};
+
+const PRESET_CATEGORY_ALIASES = {
+  kobold: ['koboldhorde'],
+  textgenerationwebui: ['textgen'],
+};
+
+function normalizePresetCategory(raw) {
+  const value = String(raw || 'openai').toLowerCase();
+  if (value === 'koboldhorde') return 'kobold';
+  if (value === 'textgen') return 'textgenerationwebui';
+  return value;
+}
+
+function getPresetCategoryVariants(category) {
+  const normalized = normalizePresetCategory(category);
+  const extras = PRESET_CATEGORY_ALIASES[normalized] || [];
+  const expanded = [normalized, ...extras.map(normalizePresetCategory)];
+  return Array.from(new Set(expanded));
+}
+
+function clonePresetEntry(entry) {
+  if (!entry || typeof entry !== 'object') return entry;
+  try {
+    return JSON.parse(JSON.stringify(entry));
+  } catch {
+    return { ...entry };
+  }
+}
+
+async function loadUserPresetList(userId, category) {
+  const variants = getPresetCategoryVariants(category);
+  const byName = new Map();
+  for (const variant of variants) {
+    try {
+      const items = await listPresets(userId, variant);
+      for (const item of Array.isArray(items) ? items : []) {
+        if (!item || typeof item !== 'object') continue;
+        const name = String(item.name || '').trim();
+        if (!name) continue;
+        byName.set(name.toLowerCase(), clonePresetEntry(item));
+      }
+    } catch (err) {
+      console.warn(`[gateway] Failed to load presets for ${variant}:`, err?.message || err);
+    }
+  }
+  return Array.from(byName.values());
+}
+
+async function findUserPresetByName(userId, category, name) {
+  const variants = getPresetCategoryVariants(category);
+  for (const variant of variants) {
+    try {
+      const preset = await getPreset(userId, variant, name);
+      if (preset) return preset;
+    } catch (err) {
+      console.warn(`[gateway] Failed to read preset ${name} for ${variant}:`, err?.message || err);
+    }
+  }
+  return null;
+}
+
+async function deletePresetAcrossCategories(userId, category, name, { includePrimary = true } = {}) {
+  const variants = getPresetCategoryVariants(category);
+  const primary = normalizePresetCategory(category);
+  for (const variant of variants) {
+    if (!includePrimary && variant === primary) continue;
+    try {
+      await deletePreset(userId, variant, name);
+    } catch (err) {
+      console.warn(`[gateway] Failed to delete preset ${name} for ${variant}:`, err?.message || err);
+    }
+  }
+}
 // Serve managed backgrounds with fallback to default bundled backgrounds
 app.use(`${BASE_PATH}/backgrounds`, (req, res, next) => {
   const rel = decodeURIComponent(String(req.path || '').replace(/^\//, ''));
@@ -387,7 +538,7 @@ async function sendBundledLibJs(res, p) {
     const code = await buildLibJs(p);
     res.setHeader('content-type', 'application/javascript; charset=utf-8');
     res.send(code);
-  } catch (e) {
+  } catch {
     // Fallback to minimal shim rewriting if bundling fails
     let code = fs.readFileSync(p, 'utf8');
     code = code.replace(/from\s+['\"]chalk['\"]/g, "from '/st-inject/chalk-shim.js'");
@@ -401,8 +552,8 @@ app.get('/lib.js', async (req, res, next) => {
     const srcPath = path.join(ST_PUBLIC, 'lib.js');
     if (!fs.existsSync(srcPath)) return next();
     return await sendBundledLibJs(res, srcPath);
-  } catch (e) {
-    return next(e);
+  } catch (err) {
+    return next(err);
   }
 });
 
@@ -411,8 +562,8 @@ app.get(`${BASE_PATH}/lib.js`, async (req, res, next) => {
     const srcPath = path.join(ST_PUBLIC, 'lib.js');
     if (!fs.existsSync(srcPath)) return next();
     return await sendBundledLibJs(res, srcPath);
-  } catch (e) {
-    return next(e);
+  } catch (err) {
+    return next(err);
   }
 });
 
@@ -476,16 +627,23 @@ app.get(['/version', `${BASE_PATH}/version`], (req, res) => {
 app.post('/api/auth/register', express.json(), async (req, res) => {
   const { email, password, card } = req.body || {};
   if (!email || !password) return toJsonError(Object.assign(new Error('email and password required'), { status: 400 }), req, res);
-  if (!card || !String(card).trim()) return toJsonError(Object.assign(new Error('card code required'), { status: 400 }), req, res);
   const passHash = crypto.createHash('sha256').update(String(password)).digest('hex');
   const tenantId = `t_default`; // placeholder; extend to real multi-tenant
   const user = await upsertUser(String(email), passHash, tenantId);
-  // redeem card on register (30 days entitlement)
-  const now = Date.now();
-  const nextExpiry = new Date(now + 30 * 24 * 3600 * 1000);
-  const ent = { plan: 'pro', expiresAt: nextExpiry.toISOString(), features: { uploads: true } };
-  await setEntitlements(user.id, ent);
-  // Seed a default API key for this user if configured
+  let ent = await getEntitlements(user.id);
+  try {
+    if (card && String(card).trim()) {
+      ent = await redeemCardForUser(user.id, card);
+    } else if (!ent?.expiresAt || new Date(ent.expiresAt).getTime() < Date.now()) {
+      const now = Date.now();
+      const trialExpiry = new Date(now + 7 * 24 * 3600 * 1000);
+      ent = { plan: 'trial', expiresAt: trialExpiry.toISOString(), features: { uploads: false } };
+      await setEntitlements(user.id, ent);
+    }
+  } catch (err) {
+    const status = err?.status || 400;
+    return toJsonError(Object.assign(new Error(err?.message || 'Redeem failed'), { status }), req, res);
+  }
   try { seedDefaultSecretFor(user.id); } catch {}
   const token = signToken({ uid: user.id, tenantId, email: user.email, iat: Date.now() });
   res.cookie('st_access', token, { httpOnly: false, sameSite: 'lax' });
@@ -494,24 +652,39 @@ app.post('/api/auth/register', express.json(), async (req, res) => {
 });
 
 app.post('/api/auth/login', express.json(), async (req, res) => {
-  const { email, password } = req.body || {};
+  const { email, password, card } = req.body || {};
   if (!email || !password) return toJsonError(Object.assign(new Error('email and password required'), { status: 400 }), req, res);
   const u = await getUserByEmail(String(email));
   if (!u) return toJsonError(Object.assign(new Error('invalid credentials'), { status: 401 }), req, res);
   const passHash = crypto.createHash('sha256').update(String(password)).digest('hex');
   if (u.passwordHash !== passHash) return toJsonError(Object.assign(new Error('invalid credentials'), { status: 401 }), req, res);
   // enforce entitlement for login
-  const ent = await getEntitlements(u.id);
+  const trimmedCard = card && String(card).trim();
+  let ent = await getEntitlements(u.id);
   const now = Date.now();
   const expiry = ent && ent.expiresAt ? new Date(ent.expiresAt).getTime() : 0;
   const valid = expiry > now;
-  if (config.enforceRightsOnLogin && !valid) {
+  if (!valid && trimmedCard) {
+    try {
+      ent = await redeemCardForUser(u.id, trimmedCard);
+    } catch (err) {
+      const status = err?.status || 400;
+      return toJsonError(Object.assign(new Error(err?.message || 'Redeem failed'), { status }), req, res);
+    }
+  } else if (!valid && config.enforceRightsOnLogin) {
     return toJsonError(Object.assign(new Error('Payment required: please redeem card code'), { status: 402 }), req, res);
+  } else if (valid && trimmedCard) {
+    try {
+      ent = await redeemCardForUser(u.id, trimmedCard);
+    } catch (err) {
+      const status = err?.status || 400;
+      return toJsonError(Object.assign(new Error(err?.message || 'Redeem failed'), { status }), req, res);
+    }
   }
   const token = signToken({ uid: u.id, tenantId: u.tenantId || 't_default', email: u.email, iat: Date.now() });
   res.cookie('st_access', token, { httpOnly: false, sameSite: 'lax' });
   setDiagnostics(res, { target: 'compat', authSource: 'login' });
-  return res.json({ ok: true, user: { id: u.id, email: u.email, tenantId: u.tenantId }, token });
+  return res.json({ ok: true, user: { id: u.id, email: u.email, tenantId: u.tenantId }, token, entitlements: ent });
 });
 
 app.get('/api/auth/me', (req, res) => {
@@ -569,7 +742,7 @@ app.get('/api/_diagnostics/radar', (req, res) => {
     const data = fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim().split('\n').slice(-tail) : [];
     setDiagnostics(res, { target: 'compat', authSource: 'none' });
     res.json({ lines: data });
-  } catch (e) {
+  } catch {
     return toJsonError(Object.assign(new Error('Failed to read radar'), { status: 500 }), req, res);
   }
 });
@@ -581,7 +754,7 @@ app.delete('/api/_diagnostics/radar', (req, res) => {
     if (fs.existsSync(p)) fs.unlinkSync(p);
     setDiagnostics(res, { target: 'compat', authSource: 'none' });
     res.json({ ok: true });
-  } catch (e) {
+  } catch {
     return toJsonError(Object.assign(new Error('Failed to clear radar'), { status: 500 }), req, res);
   }
 });
@@ -593,7 +766,7 @@ app.post('/api/_diagnostics/revoke-rights', (req, res) => {
   const ent = { plan: 'free', expiresAt: new Date(0).toISOString(), features: {} };
   Promise.resolve(setEntitlements(auth.uid, ent))
     .then(() => { setDiagnostics(res, { target: 'compat', authSource: 'cookie' }); res.json({ ok: true }); })
-    .catch((e) => toJsonError(Object.assign(new Error('Failed to revoke'), { status: 500 }), req, res));
+    .catch(() => toJsonError(Object.assign(new Error('Failed to revoke'), { status: 500 }), req, res));
 });
 
 // Require auth helper
@@ -602,6 +775,22 @@ function requireAuth(req, res) {
   const payload = verifyToken(token);
   if (!payload) return null;
   return payload; // {uid, tenantId, email}
+}
+
+async function redeemCardForUser(userId, rawCode) {
+  const code = String(rawCode || '').trim();
+  if (!code) {
+    const err = new Error('card code required');
+    err.status = 400;
+    throw err;
+  }
+  const now = Date.now();
+  const prev = await getEntitlements(userId);
+  const currentExpiry = prev?.expiresAt ? new Date(prev.expiresAt).getTime() : now;
+  const nextExpiry = new Date(Math.max(now, currentExpiry) + 30 * 24 * 3600 * 1000);
+  const ent = { plan: 'pro', expiresAt: nextExpiry.toISOString(), features: { uploads: true } };
+  await setEntitlements(userId, ent);
+  return ent;
 }
 
 // Rights and card codes
@@ -615,50 +804,100 @@ app.get('/api/rights', async (req, res) => {
 app.post('/api/cards/redeem', express.json(), async (req, res) => {
   const auth = requireAuth(req, res);
   if (!auth) return toJsonError(Object.assign(new Error('Unauthorized'), { status: 401 }), req, res);
-  const code = String(req.body?.code || '').trim();
-  if (!code) return toJsonError(Object.assign(new Error('invalid code'), { status: 400 }), req, res);
-  // simple logic: any code format AAAA-BBBB extends 30 days
-  const now = Date.now();
-  const prev = await getEntitlements(auth.uid);
-  const currentExpiry = prev.expiresAt ? new Date(prev.expiresAt).getTime() : now;
-  const nextExpiry = new Date(Math.max(now, currentExpiry) + 30 * 24 * 3600 * 1000);
-  const ent = { plan: 'pro', expiresAt: nextExpiry.toISOString(), features: { uploads: true } };
-  await setEntitlements(auth.uid, ent);
-  setDiagnostics(res, { target: 'compat', authSource: 'cookie' });
-  return res.json({ ok: true, entitlements: ent });
+  try {
+    const ent = await redeemCardForUser(auth.uid, req.body?.code);
+    setDiagnostics(res, { target: 'compat', authSource: 'cookie' });
+    return res.json({ ok: true, entitlements: ent });
+  } catch (err) {
+    const status = err?.status || 400;
+    return toJsonError(Object.assign(new Error(err?.message || 'Redeem failed'), { status }), req, res);
+  }
 });
 
 // Settings
 app.post('/api/settings/get', express.json(), async (req, res) => {
   const auth = requireAuth(req, res);
-  const defaults = {
-    firstRun: true,
-    username: auth?.email?.split('@')[0] || 'Guest',
-    active_character: '',
-    active_group: '',
-    user_avatar: '',
-    amount_gen: 80,
-    max_context: 2048,
-    main_api: 'openai',
-  };
-  const s = auth ? (await getUserSettings(auth.uid)) || defaults : defaults;
+  const storedSettings = auth ? await getUserSettings(auth.uid) : null;
+  const mergedSettings = mergeSettingsWithDefaults(storedSettings || {});
+
+  if (auth) {
+    if (!storedSettings) {
+      mergedSettings.firstRun = true;
+    }
+    const defaultName = mergedSettings.username || '';
+    if (!defaultName || defaultName === 'User') {
+      const derived = auth.email ? auth.email.split('@')[0] : '';
+      if (derived) mergedSettings.username = derived;
+    }
+  } else {
+    mergedSettings.username = mergedSettings.username || 'Guest';
+  }
+
   setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
-  // Minimal preset metadata expected by client
+
   const payload = {
-    settings: JSON.stringify(s),
+    settings: JSON.stringify(mergedSettings),
     enable_accounts: true,
     enable_extensions: false,
     enable_extensions_auto_update: false,
-    // Presets stubs
-    openai_setting_names: [],
-    openai_settings: [],
-    koboldai_setting_names: [],
-    koboldai_settings: [],
-    novelai_setting_names: [],
-    novelai_settings: [],
-    textgenerationwebui_preset_names: [],
-    textgenerationwebui_presets: [],
   };
+
+  for (const category of ADVANCED_PRESET_CATEGORIES) {
+    try {
+      const userItems = auth ? await loadUserPresetList(auth.uid, category) : [];
+      payload[category] = mergeDefaultAndUserPresets(category, userItems);
+    } catch (err) {
+      console.warn(`[gateway] Failed to load presets for ${category}:`, err?.message || err);
+      payload[category] = mergeDefaultAndUserPresets(category, []);
+    }
+  }
+
+  for (const category of COMPLETION_PRESET_CATEGORIES) {
+    const responseKeys = COMPLETION_PRESET_RESPONSE_KEYS[category];
+    if (!responseKeys) continue;
+    try {
+      const userItems = auth ? await loadUserPresetList(auth.uid, category) : [];
+      const merged = mergeDefaultAndUserCompletionPresets(category, userItems);
+      payload[responseKeys.names] = merged.map(entry => entry.name);
+      payload[responseKeys.values] = merged.map(entry => JSON.stringify(entry.preset));
+    } catch (err) {
+      console.warn(`[gateway] Failed to build preset payload for ${category}:`, err?.message || err);
+      const fallback = mergeDefaultAndUserCompletionPresets(category, []);
+      payload[responseKeys.names] = fallback.map(entry => entry.name);
+      payload[responseKeys.values] = fallback.map(entry => JSON.stringify(entry.preset));
+    }
+  }
+
+  const namedCollectionPayloads = {
+    themes: 'themes',
+    'moving-ui': 'movingUIPresets',
+    'quick-replies': 'quickReplyPresets',
+  };
+
+  for (const [category, key] of Object.entries(namedCollectionPayloads)) {
+    try {
+      const userItems = auth ? await loadUserPresetList(auth.uid, category) : [];
+      payload[key] = mergeDefaultAndUserNamedCollection(category, userItems);
+    } catch (err) {
+      console.warn(`[gateway] Failed to build collection payload for ${category}:`, err?.message || err);
+      payload[key] = mergeDefaultAndUserNamedCollection(category, []);
+    }
+  }
+
+  const worldNameSet = new Set(getDefaultWorldNames());
+  if (auth) {
+    try {
+      const items = await getWorldInfo(auth.uid);
+      for (const entry of Array.isArray(items) ? items : []) {
+        const name = String(entry?.name || entry?.id || '').trim();
+        if (name) worldNameSet.add(name);
+      }
+    } catch (err) {
+      console.warn('[gateway] Failed to load user world info names:', err?.message || err);
+    }
+  }
+  payload.world_names = Array.from(worldNameSet).sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' }));
+
   return res.json(payload);
 });
 
@@ -672,6 +911,68 @@ app.post('/api/settings/save', express.json({ limit: '2mb' }), async (req, res) 
   await saveUserSettings(auth.uid, payload);
   setDiagnostics(res, { target: 'compat', authSource: 'cookie' });
   return res.json({ ok: true });
+});
+
+function extractPresetName(raw) {
+  return String(raw || '').trim();
+}
+
+async function persistNamedPreset(req, res, handler) {
+  const auth = requireAuth(req, res);
+  if (!auth) {
+    return toJsonError(Object.assign(new Error('Unauthorized'), { status: 401 }), req, res);
+  }
+  try {
+    await handler(auth.uid);
+    setDiagnostics(res, { target: 'compat', authSource: 'cookie' });
+    return res.json({ ok: true });
+  } catch (err) {
+    const status = err?.status || 500;
+    return toJsonError(Object.assign(new Error(err?.message || 'Operation failed'), { status }), req, res);
+  }
+}
+
+app.post('/api/themes/save', express.json({ limit: '1mb' }), async (req, res) => {
+  const theme = req.body || {};
+  const name = extractPresetName(theme.name);
+  if (!name) {
+    return toJsonError(Object.assign(new Error('Bad Request'), { status: 400 }), req, res);
+  }
+  await persistNamedPreset(req, res, uid => savePreset(uid, 'themes', name, theme));
+});
+
+app.post('/api/themes/delete', express.json(), async (req, res) => {
+  const name = extractPresetName(req.body?.name);
+  if (!name) {
+    return toJsonError(Object.assign(new Error('Bad Request'), { status: 400 }), req, res);
+  }
+  await persistNamedPreset(req, res, uid => deletePreset(uid, 'themes', name));
+});
+
+app.post('/api/moving-ui/save', express.json({ limit: '1mb' }), async (req, res) => {
+  const preset = req.body || {};
+  const name = extractPresetName(preset.name);
+  if (!name) {
+    return toJsonError(Object.assign(new Error('Bad Request'), { status: 400 }), req, res);
+  }
+  await persistNamedPreset(req, res, uid => savePreset(uid, 'moving-ui', name, preset));
+});
+
+app.post('/api/quick-replies/save', express.json({ limit: '1mb' }), async (req, res) => {
+  const preset = req.body || {};
+  const name = extractPresetName(preset.name);
+  if (!name) {
+    return toJsonError(Object.assign(new Error('Bad Request'), { status: 400 }), req, res);
+  }
+  await persistNamedPreset(req, res, uid => savePreset(uid, 'quick-replies', name, preset));
+});
+
+app.post('/api/quick-replies/delete', express.json(), async (req, res) => {
+  const name = extractPresetName(req.body?.name);
+  if (!name) {
+    return toJsonError(Object.assign(new Error('Bad Request'), { status: 400 }), req, res);
+  }
+  await persistNamedPreset(req, res, uid => deletePreset(uid, 'quick-replies', name));
 });
 
 // CSRF token compatibility endpoint
@@ -770,7 +1071,7 @@ app.post('/api/avatars/upload', upload.single('avatar'), (req, res) => {
   const baseName = overwrite || `user_${Date.now().toString(36)}.png`;
   const safeName = baseName.replace(/[^A-Za-z0-9._-]+/g, '_');
   const dst = path.join(userDir, safeName);
-  try { fs.copyFileSync(req.file.path, dst); } catch (e) {
+  try { fs.copyFileSync(req.file.path, dst); } catch {
     return toJsonError(Object.assign(new Error('Upload failed'), { status: 500 }), req, res);
   }
   setDiagnostics(res, { target: 'compat', authSource: 'cookie' });
@@ -798,7 +1099,7 @@ function murmur(str){
   let h = 0; for (let i=0;i<str.length;i++){ h = Math.imul(31, h) + str.charCodeAt(i) | 0; } return h;
 }
 app.post('/api/tokenizers/:kind/:action', express.json(), (req, res, next) => {
-  const { kind, action } = req.params;
+  const { action } = req.params;
   const body = req.body || {};
   try {
     if (action === 'encode') {
@@ -819,7 +1120,7 @@ app.post('/api/tokenizers/:kind/:action', express.json(), (req, res, next) => {
       setDiagnostics(res, { target: 'compat', authSource: 'none' });
       return res.json({ count });
     }
-  } catch (e) {
+  } catch {
     return toJsonError(Object.assign(new Error('Tokenizer error'), { status: 500 }), req, res);
   }
   return next();
@@ -937,9 +1238,9 @@ for (const p of ['edge-tts/probe','office/probe','office/parse','fandom/probe','
   app.post(`/api/plugins/${p}`, express.json({ limit: '2mb' }), (req, res) => ok(res));
 }
 
-// Quick replies & themes & sprites
-for (const [base, ops] of Object.entries({ 'quick-replies': ['save','delete'], 'themes': ['save','delete'], 'sprites': ['delete'] })) {
-  for (const op of ops) app.post(`/api/${base}/${op}`, express.json({ limit: '1mb' }), (req, res) => ok(res));
+// Sprites
+for (const op of ['delete']) {
+  app.post(`/api/sprites/${op}`, express.json({ limit: '1mb' }), (req, res) => ok(res));
 }
 
 // Stats
@@ -960,6 +1261,18 @@ app.post('/api/chats/import', upload.single('file'), (req, res) => ok(res));
 
 // Simple in-memory last-LLM diagnostics
 let __LAST_LLM_DIAG = null;
+
+function buildOpenRouterTransforms(mode) {
+  const value = String(mode || '').toLowerCase();
+  if (!value || value === 'auto') return undefined;
+  if (value === 'on') return ['middle-out'];
+  if (value === 'off') return [];
+  return undefined;
+}
+
+function buildOpenRouterPlugins(enableWebSearch) {
+  return enableWebSearch ? [{ id: 'web' }] : [];
+}
 
 app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_LIMIT }), async (req, res) => {
   try {
@@ -1007,7 +1320,6 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
           if (!m) return null;
           const candidate = m[1];
           if (!/^[\d\s\+\-\/*().]+$/.test(candidate)) return null;
-          // eslint-disable-next-line no-new-func
           const val = Function(`"use strict"; return (${candidate})`)();
           if (typeof val === 'number' && Number.isFinite(val)) return String(val);
           return null;
@@ -1268,40 +1580,6 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
           }
         }
       } catch {}
-      // Intent rules for OpenAI-compatible branch (before sysCombined)
-      try {
-        if (!strictLatest2 && lastUserText2) {
-          const isMath2 = oc_isMathIntent(lastUserText2);
-          const isStory2 = oc_isStoryIntent(lastUserText2);
-          if (config.intentRuleMath && isMath2) {
-            const rule = /^zh/.test(acceptLang) ? (config.intentRuleMathTextZH||'') : (config.intentRuleMathTextEN||'');
-            if (rule) { sysList.push(rule); res.setHeader('x-st-intent-rule', 'math'); }
-          }
-          if (config.intentRuleStory && isStory2) {
-            const rule2 = /^zh/.test(acceptLang) ? (config.intentRuleStoryTextZH||'') : (config.intentRuleStoryTextEN||'');
-            if (rule2) { sysList.push(rule2); res.setHeader('x-st-intent-rule', 'story'); }
-          }
-        }
-        if (!strictLatest2 && anchorBase2) {
-          const isMathA = oc_isMathIntent(anchorBase2);
-          const isStoryA = oc_isStoryIntent(anchorBase2);
-          if (config.intentRuleMath && isMathA) {
-            const ruleA = /^zh/.test(acceptLang) ? (config.intentRuleMathTextZH||'') : (config.intentRuleMathTextEN||'');
-            if (ruleA) { sysList.push(ruleA); res.setHeader('x-st-intent-rule', 'math'); }
-          }
-          if (config.intentRuleStory && isStoryA) {
-            const ruleA2 = /^zh/.test(acceptLang) ? (config.intentRuleStoryTextZH||'') : (config.intentRuleStoryTextEN||'');
-            if (ruleA2) { sysList.push(ruleA2); res.setHeader('x-st-intent-rule', 'story'); }
-          }
-        }
-        if (!strictLatest2 && config.intentAnchor && lastUserText2) {
-          const max2 = Math.max(40, Number(config.intentAnchorClamp||400));
-          const brief2 = String(lastUserText2).slice(0, max2);
-          const t2 = /^zh/.test(acceptLang) ? (config.intentAnchorTextZH||'') : (config.intentAnchorTextEN||'');
-          const anchor2 = t2.replace('{lastUser}', brief2);
-          if (anchor2.trim()) { sysList.push(anchor2); res.setHeader('x-st-intent-anchored', 'on'); }
-        }
-      } catch {}
       // Strict mode: collapse to only the latest user text
       if (strictLatest) {
         const collapsed = String(lastUserText || anchorBase || '').trim();
@@ -1427,19 +1705,26 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
       return res.json({ id:`chatcmpl_${Date.now().toString(36)}`, object:'chat.completion', created:Math.floor(Date.now()/1000), model, choices:[{ index:0, message:{ role:'assistant', content: reply }, finish_reason:'stop' }], usage:{ prompt_tokens:1, completion_tokens: reply.length/4|0, total_tokens: (reply.length/4|0)+1 } });
     }
 
-    // OpenAI-compatible proxy
-    const isOpenAICompat = source === 'openai' || source === 'custom' || source === 'generic';
+    // OpenAI-compatible proxy (includes OpenRouter)
+    const isOpenAICompat = source === 'openai' || source === 'custom' || source === 'generic' || source === 'openrouter';
     if (isOpenAICompat) {
       const auth = requireAuth(req, res);
       const uid = auth?.uid || 'guest';
-      const keyType = (source === 'openai') ? 'api_key_openai' : 'api_key_generic';
+      const isOpenRouter = source === 'openrouter';
+      const keyType = isOpenRouter ? 'api_key_openrouter' : (source === 'openai' ? 'api_key_openai' : 'api_key_generic');
       let apiKey = (findSecretValue(uid, keyType)?.value)
         || (uid !== 'guest' ? findSecretValue('guest', keyType)?.value : '')
-        || (source === 'openai' ? (process.env.OPENAI_API_KEY || '') : (process.env.GENERIC_API_KEY || ''));
+        || (isOpenRouter
+          ? (process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_TOKEN || '')
+          : (source === 'openai' ? (process.env.OPENAI_API_KEY || '') : (process.env.GENERIC_API_KEY || '')));
       // Allow reverse proxy password to override Authorization header
       const proxyPassword = typeof body.proxy_password === 'string' ? body.proxy_password : '';
       // Resolve base URL
-      const base = String(body.custom_url || body.reverse_proxy || process.env.OPENAI_COMPAT_BASE || (source === 'openai' ? 'https://api.openai.com' : '')).replace(/\/$/, '');
+      const baseDefault = isOpenRouter ? OPENROUTER_BASE_URL : (source === 'openai' ? 'https://api.openai.com' : '');
+      const baseRaw = isOpenRouter
+        ? (body.reverse_proxy || body.custom_url || baseDefault)
+        : (body.custom_url || body.reverse_proxy || process.env.OPENAI_COMPAT_BASE || baseDefault);
+      const base = String(baseRaw || '').replace(/\/$/, '');
       if (!base) {
         function toText(m){
           const c = m && m.content;
@@ -1450,10 +1735,13 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
         }
         const last = messages[messages.length - 1] || {};
         const userText = String(toText(last)).trim();
-        const reply = userText ? `（OpenAI代理未配置）你说：${userText}` : '（OpenAI代理未配置）';
-        setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
-        res.setHeader('x-st-llm-branch', 'openai-compat-fallback');
-        __LAST_LLM_DIAG = { when: Date.now(), branch: 'openai-compat-fallback', source, model, stream };
+        const providerLabel = isOpenRouter ? 'OpenRouter' : 'OpenAI';
+        const reply = userText ? `（${providerLabel}代理未配置）你说：${userText}` : `（${providerLabel}代理未配置）`;
+        const fallbackBranch = isOpenRouter ? 'openrouter-fallback' : 'openai-compat-fallback';
+        const diagTarget = isOpenRouter ? 'openrouter' : 'compat';
+        setDiagnostics(res, { target: diagTarget, authSource: auth ? 'cookie' : 'none' });
+        res.setHeader('x-st-llm-branch', fallbackBranch);
+        __LAST_LLM_DIAG = { when: Date.now(), branch: fallbackBranch, source, model, stream };
         return res.json({ id:`chatcmpl_${Date.now().toString(36)}`, object:'chat.completion', created:Math.floor(Date.now()/1000), model, choices:[{ index:0, message:{ role:'assistant', content: reply }, finish_reason:'stop' }], usage:{ prompt_tokens:1, completion_tokens: reply.length/4|0, total_tokens: (reply.length/4|0)+1 } });
       }
 
@@ -1493,12 +1781,12 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
         s = s.replace(/^\s*\[.*?\]\s*$/gmi, '').trim();
         return s;
       }
-      function oc_isMathIntent(s){
-        try { return /只回答数字|只输出|=\?|[\d\s\+\-\/*()=]{3,}/.test(String(s||'')); } catch { return false; }
+      function oc_isMathIntent(text){
+        try { return /只回答数字|只输出|=\?|[\d\s\+\-\/*()=]{3,}/.test(String(text||'')); } catch { return false; }
       }
-      function oc_isStoryIntent(s){
+      function oc_isStoryIntent(text){
         try {
-          const t = String(s||'');
+          const t = String(text||'');
           return /(剧情推进|继续剧情|推进剧情|采取行动|继续(?!\S)|继续下去|继续写|接着|推动剧情|推进|展开(剧情|故事)?|下一步|采取(行动|下一步))/.test(t);
         } catch { return false; }
       }
@@ -1509,7 +1797,6 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
           if (!m) return null;
           const candidate = m[1];
           if (!/^[\d\s\+\-\/*().]+$/.test(candidate)) return null;
-          // eslint-disable-next-line no-new-func
           const val = Function(`"use strict"; return (${candidate})`)();
           if (typeof val === 'number' && Number.isFinite(val)) return String(val);
           return null;
@@ -1557,7 +1844,6 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
         sysList.push(/^zh/.test(acceptLang) ? (config.userPriorityTextZH || '') : (config.userPriorityTextEN || ''));
         res.setHeader('x-st-user-priority', 'on');
       }
-      const sysCombined = sysList.filter(Boolean).join('\n');
       // Ensure latest user input present in OpenAI-compatible payload
       const lastUserMsg2 = messages.slice().reverse().find(m => String(m.role||'').toLowerCase()==='user');
       let lastUserText2 = lastUserMsg2 ? toText(lastUserMsg2) : '';
@@ -1570,6 +1856,42 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
       }
       const lastAnyText2 = (function(){ for (let i=messages.length-1;i>=0;i--){ const t=String(toText(messages[i])||'').trim(); if(t) return t;} return '';})();
       const anchorBase2 = lastUserText2 || lastAnyText2;
+      const strictLatest2 = !!config.strictLatestOnly;
+      // Intent rules for OpenAI-compatible branch (before sysCombined)
+      try {
+        if (!strictLatest2 && lastUserText2) {
+          const isMath2 = oc_isMathIntent(lastUserText2);
+          const isStory2 = oc_isStoryIntent(lastUserText2);
+          if (config.intentRuleMath && isMath2) {
+            const rule = /^zh/.test(acceptLang) ? (config.intentRuleMathTextZH||'') : (config.intentRuleMathTextEN||'');
+            if (rule) { sysList.push(rule); res.setHeader('x-st-intent-rule', 'math'); }
+          }
+          if (config.intentRuleStory && isStory2) {
+            const rule2 = /^zh/.test(acceptLang) ? (config.intentRuleStoryTextZH||'') : (config.intentRuleStoryTextEN||'');
+            if (rule2) { sysList.push(rule2); res.setHeader('x-st-intent-rule', 'story'); }
+          }
+        }
+        if (!strictLatest2 && anchorBase2) {
+          const isMathA = oc_isMathIntent(anchorBase2);
+          const isStoryA = oc_isStoryIntent(anchorBase2);
+          if (config.intentRuleMath && isMathA) {
+            const ruleA = /^zh/.test(acceptLang) ? (config.intentRuleMathTextZH||'') : (config.intentRuleMathTextEN||'');
+            if (ruleA) { sysList.push(ruleA); res.setHeader('x-st-intent-rule', 'math'); }
+          }
+          if (config.intentRuleStory && isStoryA) {
+            const ruleA2 = /^zh/.test(acceptLang) ? (config.intentRuleStoryTextZH||'') : (config.intentRuleStoryTextEN||'');
+            if (ruleA2) { sysList.push(ruleA2); res.setHeader('x-st-intent-rule', 'story'); }
+          }
+        }
+        if (!strictLatest2 && config.intentAnchor && lastUserText2) {
+          const max2 = Math.max(40, Number(config.intentAnchorClamp||400));
+          const brief2 = String(lastUserText2).slice(0, max2);
+          const t2 = /^zh/.test(acceptLang) ? (config.intentAnchorTextZH||'') : (config.intentAnchorTextEN||'');
+          const anchor2 = t2.replace('{lastUser}', brief2);
+          if (anchor2.trim()) { sysList.push(anchor2); res.setHeader('x-st-intent-anchored', 'on'); }
+        }
+      } catch {}
+      const sysCombined = sysList.filter(Boolean).join('\n');
       const mathIntent2 = oc_isMathIntent(lastUserText2) || oc_isMathIntent(anchorBase2);
       let outMessages = sysCombined ? [{ role: 'system', content: sysCombined }, ...nonSystem] : nonSystem;
       if (strictLatest2) {
@@ -1599,6 +1921,49 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
         temperature: body.temperature,
         stream,
       };
+      const passthroughKeys = ['top_p','top_k','presence_penalty','frequency_penalty','repetition_penalty','min_p','top_a','seed','logit_bias','stop','n','logprobs','top_logprobs'];
+      for (const key of passthroughKeys) {
+        if (Object.prototype.hasOwnProperty.call(body, key) && body[key] !== undefined) {
+          payload[key] = body[key];
+        }
+      }
+      if (Array.isArray(body.tools)) payload.tools = body.tools;
+      if (Object.prototype.hasOwnProperty.call(body, 'tool_choice')) payload.tool_choice = body.tool_choice;
+      if (Object.prototype.hasOwnProperty.call(body, 'reasoning_effort') && !isOpenRouter) payload.reasoning_effort = body.reasoning_effort;
+      if (isOpenRouter) {
+        if (Object.prototype.hasOwnProperty.call(body, 'include_reasoning')) {
+          payload.include_reasoning = Boolean(body.include_reasoning);
+        }
+        if (body.reasoning_effort) {
+          payload.reasoning = { effort: body.reasoning_effort };
+        }
+        const transforms = buildOpenRouterTransforms(body.middleout);
+        if (transforms !== undefined) payload.transforms = transforms;
+        const plugins = buildOpenRouterPlugins(body.enable_web_search);
+        if (plugins.length) payload.plugins = plugins;
+        if (Array.isArray(body.provider) && body.provider.length) {
+          payload.provider = {
+            order: body.provider,
+            allow_fallbacks: body.allow_fallbacks !== undefined ? !!body.allow_fallbacks : true,
+          };
+        } else if (Object.prototype.hasOwnProperty.call(body, 'allow_fallbacks')) {
+          payload.provider = { allow_fallbacks: !!body.allow_fallbacks };
+        }
+        if (body.use_fallback) payload.route = 'fallback';
+        if (body.json_schema && typeof body.json_schema === 'object') {
+          payload.response_format = {
+            type: 'json_schema',
+            json_schema: {
+              name: body.json_schema.name || 'response_schema',
+              strict: body.json_schema.strict !== undefined ? !!body.json_schema.strict : true,
+              schema: body.json_schema.value || {},
+            },
+          };
+        }
+        if (/google\/gemini/i.test(model)) {
+          payload.safety_settings = GEMINI_SAFETY;
+        }
+      }
       res.setHeader('x-st-max-tokens-used', String(maxUsed));
       // remove undefined
       Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
@@ -1608,10 +1973,12 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
         if (config.intentRuleMath && mathIntent2) {
           const localMath = oc_tryEvalMath(lastUserText2 || anchorBase2);
           if (localMath != null) {
-            setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
+            const compatBranch = isOpenRouter ? 'openrouter' : 'openai-compat';
+            const diagTarget = isOpenRouter ? 'openrouter' : 'compat';
+            setDiagnostics(res, { target: diagTarget, authSource: auth ? 'cookie' : 'none' });
             res.setHeader('x-st-fallback', 'math-shortcircuit');
             res.setHeader('x-st-intent-rule', 'math');
-            res.setHeader('x-st-llm-branch', 'openai-compat');
+            res.setHeader('x-st-llm-branch', compatBranch);
             if (stream) {
               res.setHeader('content-type', 'text/event-stream; charset=utf-8');
               res.setHeader('cache-control', 'no-cache');
@@ -1625,20 +1992,31 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
         }
       } catch {}
 
-      const endpoint = `${base}/v1/chat/completions`;
+      const compatBranch = isOpenRouter ? 'openrouter' : 'openai-compat';
+      const endpointBase = base.replace(/\/$/, '');
+      const endpoint = isOpenRouter ? `${endpointBase}/chat/completions` : `${endpointBase}/v1/chat/completions`;
       const headers = new Headers({ 'content-type': 'application/json' });
       const token = proxyPassword || apiKey;
       if (token) headers.set('authorization', `Bearer ${token}`);
-      res.setHeader('x-st-llm-branch', 'openai-compat');
+      if (isOpenRouter) {
+        const referer = config.openrouterReferer || OPENROUTER_HEADER_DEFAULTS['HTTP-Referer'];
+        const title = config.openrouterTitle || OPENROUTER_HEADER_DEFAULTS['X-Title'];
+        headers.set('HTTP-Referer', referer);
+        headers.set('X-Title', title);
+        if (!headers.has('Referer')) headers.set('Referer', referer);
+      }
+      res.setHeader('x-st-llm-branch', compatBranch);
       const r = await fetch(endpoint, { method:'POST', headers, body: JSON.stringify(payload) });
       if (!r.ok) {
         const txt = await r.text();
-        setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
-        __LAST_LLM_DIAG = { when: Date.now(), branch: 'openai-compat', status: r.status, source, model, stream, error: txt.slice(0, 500) };
-        return res.status(502).json({ error: true, provider: 'openai-compat', status: r.status, message: txt.slice(0, 500) });
+        const diagTarget = isOpenRouter ? 'openrouter' : 'compat';
+        setDiagnostics(res, { target: diagTarget, authSource: auth ? 'cookie' : 'none' });
+        __LAST_LLM_DIAG = { when: Date.now(), branch: compatBranch, status: r.status, source, model, stream, error: txt.slice(0, 500) };
+        return res.status(502).json({ error: true, provider: compatBranch, status: r.status, message: txt.slice(0, 500) });
       }
-      setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
-      __LAST_LLM_DIAG = { when: Date.now(), branch: 'openai-compat', source, model, stream };
+      const diagTarget = isOpenRouter ? 'openrouter' : 'compat';
+      setDiagnostics(res, { target: diagTarget, authSource: auth ? 'cookie' : 'none' });
+      __LAST_LLM_DIAG = { when: Date.now(), branch: compatBranch, source, model, stream };
       if (stream) {
         res.setHeader('content-type', 'text/event-stream; charset=utf-8');
         res.setHeader('cache-control', 'no-cache');
@@ -2050,7 +2428,7 @@ app.post('/api/chats/export', express.json(), async (req, res) => {
   const auth = requireAuth(req, res);
   const { avatar_url, group_id, file_name } = req.body || {};
   let messages = [];
-  if (auth && group_id) messages = await getCharacterChat(auth.uid, groupKey(group_id), file_name) || [];
+  if (auth && group_id) messages = await getCharacterChat(auth.uid, group_id, file_name) || [];
   else if (auth && avatar_url) messages = await getCharacterChat(auth.uid, avatar_url, file_name) || [];
   const content = JSON.stringify({ ok: true, file: file_name, count: messages.length, messages });
   res.setHeader('content-type', 'application/json');
@@ -2149,7 +2527,7 @@ app.post('/api/characters/chats', express.json(), async (req, res) => {
 app.post('/api/chats/get', express.json(), async (req, res) => {
   const auth = requireAuth(req, res);
   if (!auth) return toJsonError(Object.assign(new Error('Unauthorized'), { status: 401 }), req, res);
-  const { ch_name, file_name, avatar_url } = req.body || {};
+  const { file_name, avatar_url } = req.body || {};
   const ch = await getCharacterByAvatar(auth.uid, avatar_url);
   if (!ch) return res.json([]);
   const charId = ch.avatar;
@@ -2162,7 +2540,7 @@ app.post('/api/chats/get', express.json(), async (req, res) => {
 app.post('/api/chats/save', express.json({ limit: '5mb' }), async (req, res) => {
   const auth = requireAuth(req, res);
   if (!auth) return toJsonError(Object.assign(new Error('Unauthorized'), { status: 401 }), req, res);
-  const { ch_name, file_name, chat, avatar_url } = req.body || {};
+  const { file_name, chat, avatar_url } = req.body || {};
   const ch = await getCharacterByAvatar(auth.uid, avatar_url);
   if (!ch) return toJsonError(Object.assign(new Error('Character Not Found'), { status: 404 }), req, res);
   const charId = ch.avatar;
@@ -2365,7 +2743,7 @@ app.post('/api/backgrounds/upload', upload.single('avatar'), (req, res) => {
   const src = req.file.path;
   const base = path.basename(req.file.originalname).replace(/[^A-Za-z0-9._ -]+/g, '_');
   const dst = path.join(MANAGED_BACKGROUNDS_DIR, base);
-  try { fs.copyFileSync(src, dst); } catch (e) { return toJsonError(Object.assign(new Error('Upload failed'), { status: 500 }), req, res); }
+  try { fs.copyFileSync(src, dst); } catch { return toJsonError(Object.assign(new Error('Upload failed'), { status: 500 }), req, res); }
   setDiagnostics(res, { target: 'compat', authSource: 'cookie' });
   res.setHeader('content-type', 'text/plain; charset=utf-8');
   return res.send(base);
@@ -2400,27 +2778,64 @@ app.post('/api/backgrounds/delete', express.json(), (req, res) => {
 app.post('/api/presets/save', express.json({ limit: '1mb' }), async (req, res) => {
   const auth = requireAuth(req, res);
   if (!auth) return toJsonError(Object.assign(new Error('Unauthorized'), { status: 401 }), req, res);
-  const { name, preset } = req.body || {};
-  await savePreset(auth.uid, String(name||'default'), preset || {});
+  const { name, preset, apiId } = req.body || {};
+  const category = normalizePresetCategory(apiId || (preset && preset.apiId) || 'openai');
+  const resolvedName = String(name || (preset && preset.name) || '').trim();
+  if (!resolvedName) {
+    return toJsonError(Object.assign(new Error('Bad Request'), { status: 400 }), req, res);
+  }
+  const payload = preset && typeof preset === 'object' ? { ...preset } : {};
+  if (!Object.prototype.hasOwnProperty.call(payload, 'name')) payload.name = resolvedName;
+  await savePreset(auth.uid, category, resolvedName, payload);
+  await deletePresetAcrossCategories(auth.uid, category, resolvedName, { includePrimary: false });
   setDiagnostics(res, { target: 'compat', authSource: 'cookie' });
-  res.json({ ok: true });
+  res.json({ name: resolvedName });
 });
 
 app.post('/api/presets/delete', express.json(), async (req, res) => {
   const auth = requireAuth(req, res);
   if (!auth) return toJsonError(Object.assign(new Error('Unauthorized'), { status: 401 }), req, res);
-  const { name } = req.body || {};
-  await deletePreset(auth.uid, String(name||''));
+  const { name, apiId } = req.body || {};
+  const resolvedName = String(name || '').trim();
+  if (!resolvedName) {
+    return toJsonError(Object.assign(new Error('Bad Request'), { status: 400 }), req, res);
+  }
+  const category = normalizePresetCategory(apiId || 'openai');
+  await deletePresetAcrossCategories(auth.uid, category, resolvedName);
   setDiagnostics(res, { target: 'compat', authSource: 'cookie' });
   res.json({ ok: true });
 });
 
 app.post('/api/presets/restore', express.json(), async (req, res) => {
   const auth = requireAuth(req, res);
-  const name = req.body?.name || 'default';
-  const p = auth ? await getPreset(auth.uid, String(name)) : null;
+  const category = normalizePresetCategory(req.body?.apiId || 'openai');
+  const name = String(req.body?.name || '').trim();
+  let preset = {};
+  let isDefault = false;
+  if (name) {
+    const defaultPreset = getDefaultPreset(category, name);
+    if (defaultPreset) {
+      preset = defaultPreset;
+      isDefault = true;
+    } else {
+      const completionDefault = getDefaultCompletionPreset(category, name);
+      if (completionDefault) {
+        preset = completionDefault;
+        isDefault = true;
+      } else {
+        const namedDefault = getDefaultNamedEntry(category, name);
+        if (namedDefault) {
+          preset = namedDefault;
+          isDefault = true;
+        } else if (auth) {
+          const current = await findUserPresetByName(auth.uid, category, name);
+          if (current) preset = current;
+        }
+      }
+    }
+  }
   setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
-  res.json(p || {});
+  res.json({ isDefault, preset });
 });
 
 // World Info (minimal)
@@ -2481,7 +2896,7 @@ app.get('/api/extensions/discover', (_req, res) => {
     }
     setDiagnostics(res, { target: 'compat', authSource: 'none' });
     res.json(list);
-  } catch (e) {
+  } catch {
     setDiagnostics(res, { target: 'compat', authSource: 'none' });
     res.json([]);
   }
@@ -2570,7 +2985,7 @@ app.use('/api', async (req, res, next) => {
         res.setHeader(key, value);
       });
       return upstreamRes.body.pipe(res);
-    } catch (e) {
+    } catch {
       return toJsonError(Object.assign(new Error('Upstream error'), { status: 502 }), req, res);
     }
   }
@@ -2635,7 +3050,7 @@ app.get('/api/_diagnostics/radar', (req, res) => {
     const data = fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim().split('\n').slice(-tail) : [];
     setDiagnostics(res, { target: 'compat', authSource: 'none' });
     res.json({ lines: data });
-  } catch (e) {
+  } catch {
     return toJsonError(Object.assign(new Error('Failed to read radar'), { status: 500 }), req, res);
   }
 });
@@ -2647,7 +3062,7 @@ app.delete('/api/_diagnostics/radar', (req, res) => {
     if (fs.existsSync(p)) fs.unlinkSync(p);
     setDiagnostics(res, { target: 'compat', authSource: 'none' });
     res.json({ ok: true });
-  } catch (e) {
+  } catch {
     return toJsonError(Object.assign(new Error('Failed to clear radar'), { status: 500 }), req, res);
   }
 });
