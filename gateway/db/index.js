@@ -8,7 +8,7 @@ try {
   } else {
     impl = await import('./file.js');
   }
-} catch (e) {
+} catch {
   impl = await import('./file.js');
 }
 

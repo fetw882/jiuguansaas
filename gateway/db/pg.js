@@ -1,5 +1,43 @@
 import pg from 'pg';
 
+const PRESET_DELIM = ':::';
+
+function encodePresetKey(category, name) {
+  const cat = String(category || 'openai');
+  const nm = String(name || '').trim();
+  return nm ? `${cat}${PRESET_DELIM}${nm}` : cat;
+}
+
+function decodePresetKey(key) {
+  const raw = String(key || '');
+  const idx = raw.indexOf(PRESET_DELIM);
+  if (idx === -1) {
+    return { category: 'openai', name: raw };
+  }
+  const category = raw.slice(0, idx) || 'openai';
+  const name = raw.slice(idx + PRESET_DELIM.length);
+  return { category, name };
+}
+
+function normalizePresetPayload(payload, fallbackName) {
+  if (!payload || typeof payload !== 'object') {
+    return { name: fallbackName };
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, 'name')) {
+    return { ...payload, name: fallbackName };
+  }
+  return { ...payload };
+}
+
+function clonePreset(payload) {
+  if (payload === null || payload === undefined) return payload;
+  try {
+    return JSON.parse(JSON.stringify(payload));
+  } catch {
+    return payload;
+  }
+}
+
 const connStr = process.env.PG_URL || process.env.DATABASE_URL || undefined;
 const pool = new pg.Pool(connStr ? { connectionString: connStr } : undefined);
 
@@ -158,28 +196,61 @@ export async function deleteCharacterChat(userId, characterId, chatName) {
   await pool.query('delete from st_chats where user_id=$1 and character_id=$2 and chat_name=$3', [id, characterId, chatName]);
 }
 
-export async function listPresets(userId) {
+export async function listPresets(userId, category) {
   await init();
   const id = fromUid(userId);
-  const res = await pool.query('select name from st_presets where user_id=$1', [id]);
-  return res.rows.map(r => r.name);
+  const res = await pool.query('select name, payload from st_presets where user_id=$1', [id]);
+  const results = [];
+  for (const row of res.rows) {
+    const { category: cat, name } = decodePresetKey(row.name);
+    if (category && cat !== category) continue;
+    if (!name) continue;
+    results.push(clonePreset(normalizePresetPayload(row.payload, name)));
+  }
+  return results;
 }
-export async function savePreset(userId, name, data) {
+export async function savePreset(userId, categoryOrName, maybeName, maybeData) {
   await init();
+  const useLegacy = maybeData === undefined && maybeName !== undefined;
+  const category = useLegacy ? 'openai' : String(categoryOrName || 'openai');
+  const name = useLegacy ? String(categoryOrName || '') : String(maybeName || '');
+  const data = useLegacy ? maybeName : maybeData;
+  if (!name) return;
   const id = fromUid(userId);
+  const key = encodePresetKey(category, name);
+  const payload = normalizePresetPayload(data, name);
   await pool.query(`insert into st_presets(user_id, name, payload) values ($1,$2,$3)
-    on conflict (user_id, name) do update set payload=excluded.payload`, [id, name, data]);
+    on conflict (user_id, name) do update set payload=excluded.payload`, [id, key, payload]);
+  if (!useLegacy && category === 'openai') {
+    await pool.query('delete from st_presets where user_id=$1 and name=$2', [id, name]);
+  }
 }
-export async function getPreset(userId, name) {
+export async function getPreset(userId, categoryOrName, maybeName) {
   await init();
+  const useLegacy = maybeName === undefined;
+  const category = useLegacy ? 'openai' : String(categoryOrName || 'openai');
+  const name = useLegacy ? String(categoryOrName || '') : String(maybeName || '');
+  if (!name) return null;
   const id = fromUid(userId);
-  const res = await pool.query('select payload from st_presets where user_id=$1 and name=$2', [id, name]);
-  return res.rowCount ? res.rows[0].payload : null;
+  const key = encodePresetKey(category, name);
+  let res = await pool.query('select payload from st_presets where user_id=$1 and name=$2', [id, key]);
+  if (!res.rowCount && category === 'openai') {
+    res = await pool.query('select payload from st_presets where user_id=$1 and name=$2', [id, name]);
+  }
+  return res.rowCount ? clonePreset(normalizePresetPayload(res.rows[0].payload, name)) : null;
 }
-export async function deletePreset(userId, name) {
+export async function deletePreset(userId, categoryOrName, maybeName) {
   await init();
+  const useLegacy = maybeName === undefined;
+  const category = useLegacy ? 'openai' : String(categoryOrName || 'openai');
+  const name = useLegacy ? String(categoryOrName || '') : String(maybeName || '');
+  if (!name) return;
   const id = fromUid(userId);
-  await pool.query('delete from st_presets where user_id=$1 and name=$2', [id, name]);
+  const key = encodePresetKey(category, name);
+  await pool.query('delete from st_presets where user_id=$1 and name=$2', [id, key]);
+  if (category === 'openai') {
+    await pool.query('delete from st_presets where user_id=$1 and name=$2', [id, name]);
+  }
 }
 
 export async function getWorldInfo(userId) {

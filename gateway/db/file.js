@@ -5,6 +5,43 @@ import path from 'path';
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const dataDir = path.resolve(__dirname, '../data');
 const dbPath = path.join(dataDir, 'db.json');
+const PRESET_DELIM = ':::';
+
+function encodePresetKey(category, name) {
+  const cat = String(category || 'openai');
+  const nm = String(name || '').trim();
+  return nm ? `${cat}${PRESET_DELIM}${nm}` : cat;
+}
+
+function decodePresetKey(key) {
+  const raw = String(key || '');
+  const idx = raw.indexOf(PRESET_DELIM);
+  if (idx === -1) {
+    return { category: 'openai', name: raw };
+  }
+  const category = raw.slice(0, idx) || 'openai';
+  const name = raw.slice(idx + PRESET_DELIM.length);
+  return { category, name };
+}
+
+function ensurePresetPayload(data, fallbackName) {
+  if (!data || typeof data !== 'object') {
+    return { name: fallbackName };
+  }
+  if (!Object.prototype.hasOwnProperty.call(data, 'name')) {
+    return { ...data, name: fallbackName };
+  }
+  return { ...data };
+}
+
+function clonePreset(data) {
+  if (data === null || data === undefined) return data;
+  try {
+    return JSON.parse(JSON.stringify(data));
+  } catch {
+    return data;
+  }
+}
 
 function ensure() {
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
@@ -50,10 +87,63 @@ export function getCharacterChat(userId, characterId, chatName) { const db = rea
 export function deleteCharacterChat(userId, characterId, chatName) { const db = readDb(); ensureChats(db, userId); if (!db.chats[userId][characterId]) return; delete db.chats[userId][characterId][chatName]; writeDb(db); }
 
 // Presets
-export function listPresets(userId) { const db = readDb(); db.presets = db.presets || {}; return Object.keys(db.presets[userId] || {}); }
-export function savePreset(userId, name, data) { const db = readDb(); db.presets = db.presets || {}; if (!db.presets[userId]) db.presets[userId] = {}; db.presets[userId][name] = data; writeDb(db); }
-export function getPreset(userId, name) { const db = readDb(); db.presets = db.presets || {}; return (db.presets[userId]||{})[name] || null; }
-export function deletePreset(userId, name) { const db = readDb(); db.presets = db.presets || {}; if (db.presets[userId]) delete db.presets[userId][name]; writeDb(db); }
+export function listPresets(userId, category) {
+  const db = readDb();
+  db.presets = db.presets || {};
+  const userMap = db.presets[userId] || {};
+  const results = [];
+  for (const [key, value] of Object.entries(userMap)) {
+    const { category: cat, name } = decodePresetKey(key);
+    if (category && cat !== category) continue;
+    if (!name) continue;
+    const payload = ensurePresetPayload(value, name);
+    results.push(clonePreset(payload));
+  }
+  return results;
+}
+
+export function savePreset(userId, categoryOrName, maybeName, maybeData) {
+  const useLegacy = maybeData === undefined && maybeName !== undefined;
+  const category = useLegacy ? 'openai' : String(categoryOrName || 'openai');
+  const name = useLegacy ? String(categoryOrName || '') : String(maybeName || '');
+  const data = useLegacy ? maybeName : maybeData;
+  if (!name) return;
+  const key = encodePresetKey(category, name);
+  const db = readDb();
+  db.presets = db.presets || {};
+  if (!db.presets[userId]) db.presets[userId] = {};
+  db.presets[userId][key] = ensurePresetPayload(data, name);
+  // Maintain legacy key for openai if present to avoid duplicates
+  if (!useLegacy && category === 'openai' && db.presets[userId][name]) delete db.presets[userId][name];
+  writeDb(db);
+}
+
+export function getPreset(userId, categoryOrName, maybeName) {
+  const useLegacy = maybeName === undefined;
+  const category = useLegacy ? 'openai' : String(categoryOrName || 'openai');
+  const name = useLegacy ? String(categoryOrName || '') : String(maybeName || '');
+  if (!name) return null;
+  const db = readDb();
+  db.presets = db.presets || {};
+  const userMap = db.presets[userId] || {};
+  const key = encodePresetKey(category, name);
+  const found = userMap[key] || (category === 'openai' ? userMap[name] : null);
+  return found ? clonePreset(ensurePresetPayload(found, name)) : null;
+}
+
+export function deletePreset(userId, categoryOrName, maybeName) {
+  const useLegacy = maybeName === undefined;
+  const category = useLegacy ? 'openai' : String(categoryOrName || 'openai');
+  const name = useLegacy ? String(categoryOrName || '') : String(maybeName || '');
+  if (!name) return;
+  const db = readDb();
+  db.presets = db.presets || {};
+  if (!db.presets[userId]) db.presets[userId] = {};
+  const key = encodePresetKey(category, name);
+  delete db.presets[userId][key];
+  if (category === 'openai') delete db.presets[userId][name];
+  writeDb(db);
+}
 
 // World Info
 export function getWorldInfo(userId) { const db = readDb(); db.worldinfo = db.worldinfo || {}; return db.worldinfo[userId] || []; }
