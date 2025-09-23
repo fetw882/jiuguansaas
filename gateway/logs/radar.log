@@ -1,0 +1,17 @@
+{"ts":1758043795644,"path":"/api/_diagnostics/state","method":"GET","rid":"Pco27DghtV9uDHiLRcrg4"}
+{"ts":1758047055403,"path":"/api/_diagnostics/metrics","method":"GET","rid":"5zg-Ibp-KhZLBmRE2Bgf5"}
+{"ts":1758047101428,"path":"/api/_diagnostics/metrics","method":"GET","rid":"tcmkWALVNB9Zgc6-uNzjF"}
+{"ts":1758047164934,"path":"/api/_diagnostics/metrics","method":"GET","rid":"Nc-IJlq1CcjmM_hDBnCTg"}
+{"ts":1758050690722,"path":"/api/not_mapped","method":"GET","rid":"Fj2mQDl3BC2BTenVU72d7"}
+{"ts":1758076046760,"path":"/api/users/me","method":"GET","rid":"8rrlUwkEPCnT5fEJwybaB"}
+{"ts":1758076245022,"path":"/api/users/me","method":"GET","rid":"MjSHApDJeFr5KE1AXLDvX"}
+{"ts":1758076253879,"path":"/api/users/me","method":"GET","rid":"RHbzhVFFPMmcXefIHc9B_"}
+{"ts":1758076340836,"path":"/api/users/me","method":"GET","rid":"Xz5QAmLhn8HT18DYD07qI"}
+{"ts":1758081307273,"path":"/api/tokenizers/openai/count","method":"POST","rid":"Y908OgE04ti-d9d-LqbYJ"}
+{"ts":1758081315939,"path":"/api/tokenizers/openai/count","method":"POST","rid":"lXIgKIkAG9YhJb3rhpaz4"}
+{"ts":1758081317885,"path":"/api/tokenizers/openai/count","method":"POST","rid":"tsZAbz4-2dUT6uWxQfdiR"}
+{"ts":1758082873120,"path":"/api/stats/get","method":"POST","rid":"vst6CJQHqsLdPJ8p24Uk9"}
+{"ts":1758190157295,"path":"/api/_diagnostics/last-llm%EF%BC%8C%E5%BA%94%E8%AF%A5%E7%9C%8B%E5%88%B0","method":"GET","rid":"oTIdPKmirR-OaYhUlBLyl"}
+{"ts":1758199594194,"path":"/api/characters/all%EF%BC%88%E5%B8%A6%E7%99%BB%E5%BD%95","method":"GET","rid":"zBnlkZr5CEc8g1IIYbaTL"}
+{"ts":1758202376202,"path":"/api/_diagnostics/last-llm%EF%BC%88%E7%9C%8B%E6%98%AF%E5%90%A6%E6%9B%B4%E6%96%B0%EF%BC%89","method":"GET","rid":"2Ln2QkFEr1uG62aIw7Ns0"}
+{"ts":1758245966545,"path":"/api/backends/chat-completions/generate","method":"GET","rid":"JcObNY3GAKZLpkgePl8AS"}
