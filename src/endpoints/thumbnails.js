@@ -193,7 +193,7 @@ router.get('/', async function (request, response) {
         }
 
         const type = request.query.type;
-        const file = sanitize(request.query.file);
+        const file = request.query.file;
 
         if (!type || !file) {
             return response.sendStatus(400);
@@ -203,7 +203,9 @@ router.get('/', async function (request, response) {
             return response.sendStatus(400);
         }
 
-        if (sanitize(file) !== file) {
+        const sanitizedFile = sanitize(file);
+
+        if (sanitizedFile !== file) {
             console.error('Malicious filename prevented');
             return response.sendStatus(403);
         }
@@ -215,7 +217,7 @@ router.get('/', async function (request, response) {
                 return response.sendStatus(400);
             }
 
-            const pathToOriginalFile = path.join(folder, file);
+            const pathToOriginalFile = path.join(folder, sanitizedFile);
             if (!fs.existsSync(pathToOriginalFile)) {
                 return response.sendStatus(404);
             }
@@ -225,7 +227,7 @@ router.get('/', async function (request, response) {
             return response.send(originalFile);
         }
 
-        const pathToCachedFile = await generateThumbnail(request.user.directories, type, file);
+        const pathToCachedFile = await generateThumbnail(request.user.directories, type, sanitizedFile);
 
         if (!pathToCachedFile) {
             return response.sendStatus(404);
