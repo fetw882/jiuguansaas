@@ -87,16 +87,55 @@ async function init() {
       payload jsonb,
       primary key(user_id, id)
     );
+    create table if not exists st_secrets (
+      user_uid text not null,
+      secret_key text not null,
+      secret_id text not null,
+      value text not null,
+      label text,
+      active boolean default false,
+      created_at timestamptz default now(),
+      primary key(user_uid, secret_key, secret_id)
+    );
   `);
   await pool.query(`
     create index if not exists idx_characters_user_avatar on st_characters(user_id, avatar);
     create index if not exists idx_chats_user_char on st_chats(user_id, character_id);
     create index if not exists idx_presets_user_name on st_presets(user_id, name);
+    create index if not exists idx_secrets_user_key on st_secrets(user_uid, secret_key);
   `);
 }
 
 function toUser(row) { return { id: `u_${row.id}`, email: row.email, passwordHash: row.password_hash, tenantId: row.tenant_id }; }
 function fromUid(uid) { return Number(String(uid||'').replace(/^u_/, '')) || null; }
+
+function normalizeSecretUser(uid) {
+  const raw = String(uid || '').trim();
+  return raw ? raw : 'guest';
+}
+
+function generateSecretId() {
+  return `sec_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+function defaultSecretLabel(label) {
+  return typeof label === 'string' && label.trim().length ? label : new Date().toLocaleString();
+}
+
+async function withTransaction(cb) {
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const result = await cb(client);
+    await client.query('commit');
+    return result;
+  } catch (err) {
+    try { await client.query('rollback'); } catch {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 export async function upsertUser(email, passwordHash, tenantId) {
   await init();
@@ -297,4 +336,98 @@ export async function deleteGroup(userId, gid) {
   await init();
   const id = fromUid(userId);
   await pool.query('delete from st_groups where user_id=$1 and id=$2', [id, String(gid)]);
+}
+
+function rowsToSecretState(rows) {
+  const map = {};
+  for (const row of rows) {
+    const key = row.secret_key;
+    if (!map[key]) map[key] = [];
+    map[key].push({
+      id: row.secret_id,
+      value: row.value,
+      label: row.label ?? '',
+      active: row.active,
+    });
+  }
+  return map;
+}
+
+export async function getSecretState(userId) {
+  await init();
+  const uid = normalizeSecretUser(userId);
+  const res = await pool.query(
+    'select secret_key, secret_id, value, label, active from st_secrets where user_uid=$1 order by secret_key asc, created_at asc',
+    [uid],
+  );
+  return rowsToSecretState(res.rows);
+}
+
+export async function writeSecretValue(userId, key, value, label) {
+  await init();
+  const uid = normalizeSecretUser(userId);
+  const entryId = generateSecretId();
+  const entryLabel = defaultSecretLabel(label);
+  await withTransaction(async (client) => {
+    await client.query('update st_secrets set active=false where user_uid=$1 and secret_key=$2', [uid, key]);
+    await client.query(
+      'insert into st_secrets(user_uid, secret_key, secret_id, value, label, active) values ($1,$2,$3,$4,$5,true)',
+      [uid, key, entryId, value, entryLabel],
+    );
+  });
+  return { id: entryId, value, label: entryLabel, active: true };
+}
+
+export async function findSecretValue(userId, key, id) {
+  await init();
+  const uid = normalizeSecretUser(userId);
+  const res = await pool.query(
+    'select secret_id, value, active from st_secrets where user_uid=$1 and secret_key=$2 order by created_at asc',
+    [uid, key],
+  );
+  if (!res.rowCount) return null;
+  const rows = res.rows;
+  const match = id ? rows.find((row) => row.secret_id === id) : rows.find((row) => row.active) || rows[0];
+  return match ? { id: match.secret_id, value: match.value } : null;
+}
+
+export async function deleteSecretValue(userId, key, id) {
+  await init();
+  const uid = normalizeSecretUser(userId);
+  await withTransaction(async (client) => {
+    const existing = await client.query(
+      'select secret_id, active from st_secrets where user_uid=$1 and secret_key=$2 order by created_at asc',
+      [uid, key],
+    );
+    if (!existing.rowCount) return;
+    const rows = existing.rows;
+    const targetId = id || (rows.find((row) => row.active)?.secret_id || rows[0].secret_id);
+    await client.query('delete from st_secrets where user_uid=$1 and secret_key=$2 and secret_id=$3', [uid, key, targetId]);
+    const remaining = await client.query(
+      'select secret_id, active from st_secrets where user_uid=$1 and secret_key=$2 order by created_at asc',
+      [uid, key],
+    );
+    if (remaining.rowCount && !remaining.rows.some((row) => row.active)) {
+      const promoteId = remaining.rows[0].secret_id;
+      await client.query('update st_secrets set active=true where user_uid=$1 and secret_key=$2 and secret_id=$3', [uid, key, promoteId]);
+    }
+  });
+}
+
+export async function rotateSecretValue(userId, key, id) {
+  await init();
+  const uid = normalizeSecretUser(userId);
+  await withTransaction(async (client) => {
+    await client.query('update st_secrets set active=false where user_uid=$1 and secret_key=$2', [uid, key]);
+    await client.query('update st_secrets set active=true where user_uid=$1 and secret_key=$2 and secret_id=$3', [uid, key, id]);
+  });
+}
+
+export async function renameSecretValue(userId, key, id, label) {
+  await init();
+  const uid = normalizeSecretUser(userId);
+  await pool.query(
+    'update st_secrets set label=$4 where user_uid=$1 and secret_key=$2 and secret_id=$3',
+    [uid, key, id, defaultSecretLabel(label)],
+  );
 }

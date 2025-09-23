@@ -102,20 +102,20 @@ app.use(morgan(':method :url :status :res[content-length] - :response-time ms id
 app.use(cookieParser());
 
 // Default secret seeding helper (env driven)
-function seedDefaultSecretFor(uid) {
+async function seedDefaultSecretFor(uid) {
   const defVal = process.env.DEFAULT_API_KEY || '';
   const defKey = process.env.DEFAULT_API_KEY_TYPE || '';
   if (!defVal || !defKey) return;
   try {
-    const map = getSecretState(uid) || {};
+    const map = (await getSecretState(uid)) || {};
     if (!Array.isArray(map[defKey]) || map[defKey].length === 0) {
-      writeSecretValue(uid, defKey, defVal, 'Default');
+      await writeSecretValue(uid, defKey, defVal, 'Default');
     }
   } catch {}
 }
 
 // Seed global default for guests on startup (if configured)
-try { seedDefaultSecretFor('guest'); } catch {}
+seedDefaultSecretFor('guest');
 
 // JSON error wrapper
 function toJsonError(err, req, res) {
@@ -644,7 +644,7 @@ app.post('/api/auth/register', express.json(), async (req, res) => {
     const status = err?.status || 400;
     return toJsonError(Object.assign(new Error(err?.message || 'Redeem failed'), { status }), req, res);
   }
-  try { seedDefaultSecretFor(user.id); } catch {}
+  try { await seedDefaultSecretFor(user.id); } catch {}
   const token = signToken({ uid: user.id, tenantId, email: user.email, iat: Date.now() });
   res.cookie('st_access', token, { httpOnly: false, sameSite: 'lax' });
   setDiagnostics(res, { target: 'compat', authSource: 'register' });
@@ -985,63 +985,63 @@ app.get('/csrf-token', (req, res) => {
 const upload = multer({ dest: path.join(__dirname, 'uploads') });
 
 // Secrets API (persistent per-user)
-app.post('/api/secrets/read', (req, res) => {
+app.post('/api/secrets/read', async (req, res) => {
   const auth = requireAuth(req, res);
   const uid = auth?.uid || 'guest';
-  try { seedDefaultSecretFor(uid); } catch {}
-  const state = getSecretState(uid) || {};
+  try { await seedDefaultSecretFor(uid); } catch {}
+  const state = (await getSecretState(uid)) || {};
   setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
   return res.json(state);
 });
-app.post('/api/secrets/find', express.json(), (req, res) => {
+app.post('/api/secrets/find', express.json(), async (req, res) => {
   const auth = requireAuth(req, res);
   const uid = auth?.uid || 'guest';
   const { key, id } = req.body || {};
   if (!key) return toJsonError(Object.assign(new Error('Bad Request'), { status: 400 }), req, res);
-  const found = findSecretValue(uid, String(key), id ? String(id) : undefined);
+  const found = await findSecretValue(uid, String(key), id ? String(id) : undefined);
   setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
   return res.json({ value: found?.value ?? null, id: found?.id ?? null });
 });
-app.post('/api/secrets/write', express.json(), (req, res) => {
+app.post('/api/secrets/write', express.json(), async (req, res) => {
   const auth = requireAuth(req, res);
   const uid = auth?.uid || 'guest';
   const { key, value, label } = req.body || {};
   if (!key || typeof value !== 'string') return toJsonError(Object.assign(new Error('Bad Request'), { status: 400 }), req, res);
-  const entry = writeSecretValue(uid, String(key), String(value), label ? String(label) : undefined);
+  const entry = await writeSecretValue(uid, String(key), String(value), label ? String(label) : undefined);
   setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
   return res.json({ id: entry.id });
 });
-app.post('/api/secrets/delete', express.json(), (req, res) => {
+app.post('/api/secrets/delete', express.json(), async (req, res) => {
   const auth = requireAuth(req, res);
   const uid = auth?.uid || 'guest';
   const { key, id } = req.body || {};
   if (!key) return toJsonError(Object.assign(new Error('Bad Request'), { status: 400 }), req, res);
-  deleteSecretValue(uid, String(key), id ? String(id) : undefined);
+  await deleteSecretValue(uid, String(key), id ? String(id) : undefined);
   setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
   return res.json({ ok: true });
 });
-app.post('/api/secrets/rename', express.json(), (req, res) => {
+app.post('/api/secrets/rename', express.json(), async (req, res) => {
   const auth = requireAuth(req, res);
   const uid = auth?.uid || 'guest';
   const { key, id, label } = req.body || {};
   if (!key || !id || typeof label !== 'string') return toJsonError(Object.assign(new Error('Bad Request'), { status: 400 }), req, res);
-  renameSecretValue(uid, String(key), String(id), String(label));
+  await renameSecretValue(uid, String(key), String(id), String(label));
   setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
   return res.json({ ok: true });
 });
-app.post('/api/secrets/rotate', express.json(), (req, res) => {
+app.post('/api/secrets/rotate', express.json(), async (req, res) => {
   const auth = requireAuth(req, res);
   const uid = auth?.uid || 'guest';
   const { key, id } = req.body || {};
   if (!key || !id) return toJsonError(Object.assign(new Error('Bad Request'), { status: 400 }), req, res);
-  rotateSecretValue(uid, String(key), String(id));
+  await rotateSecretValue(uid, String(key), String(id));
   setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
   return res.json({ ok: true });
 });
-app.post('/api/secrets/view', express.json(), (req, res) => {
+app.post('/api/secrets/view', express.json(), async (req, res) => {
   const auth = requireAuth(req, res);
   const uid = auth?.uid || 'guest';
-  const state = getSecretState(uid) || {};
+  const state = (await getSecretState(uid)) || {};
   setDiagnostics(res, { target: 'compat', authSource: auth ? 'cookie' : 'none' });
   return res.json(state);
 });
@@ -1360,11 +1360,11 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
       }
       const auth = requireAuth(req, res);
       const uid = auth?.uid || 'guest';
-      const found = findSecretValue(uid, 'api_key_makersuite', undefined);
+      const found = await findSecretValue(uid, 'api_key_makersuite', undefined);
       let apiKey = (found && found.value) || process.env.MAKERSUITE_API_KEY || '';
       // Fallback to guest/global key if user scoped key is missing
       if (!apiKey) {
-        const guestFound = findSecretValue('guest', 'api_key_makersuite', undefined);
+        const guestFound = await findSecretValue('guest', 'api_key_makersuite', undefined);
         apiKey = (guestFound && guestFound.value) || apiKey;
       }
       if (!apiKey) {
@@ -1725,8 +1725,10 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
       const uid = auth?.uid || 'guest';
       const isOpenRouter = source === 'openrouter';
       const keyType = isOpenRouter ? 'api_key_openrouter' : (source === 'openai' ? 'api_key_openai' : 'api_key_generic');
-      let apiKey = (findSecretValue(uid, keyType)?.value)
-        || (uid !== 'guest' ? findSecretValue('guest', keyType)?.value : '')
+      const userSecret = await findSecretValue(uid, keyType);
+      const guestSecret = uid !== 'guest' ? await findSecretValue('guest', keyType) : null;
+      let apiKey = (userSecret && userSecret.value)
+        || (uid !== 'guest' ? guestSecret?.value : undefined)
         || (isOpenRouter
           ? (process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_TOKEN || '')
           : (source === 'openai' ? (process.env.OPENAI_API_KEY || '') : (process.env.GENERIC_API_KEY || '')));
@@ -1936,8 +1938,7 @@ app.post('/api/backends/chat-completions/generate', express.json({ limit: JSON_L
             if (anchor2.trim()) { sysList.push(anchor2); res.setHeader('x-st-intent-anchored', 'on'); }
           }
         } catch {}
-        const sysCombined = sysList.filter(Boolean).join('
-');
+        const sysCombined = sysList.filter(Boolean).join('\n');
         mathIntent2 = oc_isMathIntent(lastUserText2) || oc_isMathIntent(anchorBase2);
         outMessages = sysCombined ? [{ role: 'system', content: sysCombined }, ...nonSystem] : nonSystem;
         if (strictLatest2) {
